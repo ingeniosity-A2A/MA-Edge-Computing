@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Ava007 Dialer</string>
+    <string name="account_label">S26 Ultra A2A VoIP</string>
+    <string name="account_short_description">Ava007 self-managed VoIP line</string>
+    <string name="call_log_settings_title">Ava007 call log integration</string>
+</resources>
