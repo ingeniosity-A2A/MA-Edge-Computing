@@ -1,1 +1,41 @@
+# S26 Ultra — MEC device plane
 
+Target package namespace for Ava007 Dialer: `com.s26ultra.a2a`
+
+## Qualcomm GenieX Chat Android (on-device LLM/VLM)
+
+Upstream sample for Snapdragon NPU/GPU/CPU chat on Android:
+
+- **Source:** https://github.com/qualcomm/ai-hub-apps/blob/release/geniex_chat_android/info.yaml
+- **App id:** `geniex_chat_android`
+- **Headline:** Run LLMs and VLMs on Android with GenieX
+- **Runtime:** `geniex_qairt`, `geniex_llamacpp`
+- **License:** BSD-3-Clause (nexa-sdk)
+- **OS:** Android 12+
+- **Languages:** Kotlin, Java
+- **Models download at runtime** via GenieX SDK (`disable_cli_model_fetch: true`)
+
+### Supported devices (upstream)
+
+| Device | Status |
+|--------|--------|
+| Samsung Galaxy S25 | Tested |
+| Samsung Galaxy S26 | Not Tested |
+
+S26 / S26 Ultra is the intended validation target for Ava007 on-device intelligence
+alongside the Dialer (`apps/Ava007-Dialer`). GenieX is a **reference integration**,
+not a weight merge into the Dialer APK.
+
+### Related models (upstream list)
+
+`qwen3_0_6b`, `qwen3_1_7b`, `ministral_3_3b_instruct_2512`, `granite_4_0_micro`,
+`phi_4_mini_instruct`, `gemma_4_e2b_it`, `gemma_4_e4b_it`, `qwen3_5_0_8b`,
+`qwen3_5_2b`, `qwen3_vl_2b_instruct`, `qwen3_vl_4b_instruct`, `qwen3_4b`,
+`qwen3_4b_instruct_2507`, `qwen2_5_vl_7b_instruct`
+
+### Policy
+
+- Dialer source stays under `apps/Ava007-Dialer` (Gradle 8.11.1).
+- pnpm applies only if/when a JS workspace package is added; it does **not** build the APK.
+- APK builds use a container with JDK 17 + Android SDK 36 + Gradle — no GitHub Actions requirement, no Termux project layout.
+- See `docs/MEC-WORKSPACE.md` and `docs/container-apk-build.md`.
