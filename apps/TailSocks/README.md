@@ -81,3 +81,18 @@ An exit node is not a source of mobile data: the phone still needs some working 
 - Do not publish debug APKs as production releases or imply that Ingeniosity signed upstream artifacts.
 - This integration has not been device-tested by this repository change. Record build logs and test Proxy mode before claiming success.
 - Upstream project and trademark remain with their respective owners; TailSocks is not an official Tailscale product.
+
+## Fast install on the Galaxy S26 Ultra (Termux)
+
+This path uses the upstream ARM64 release APK. It does **not** rebuild the Android SDK or compile TailSocks. The script fetches the latest GitHub release metadata, checks the published SHA-256 digest and file size, then opens Android's package installer. You must approve installation on the phone.
+
+Run in Termux:
+
+```bash
+pkg install -y curl python coreutils termux-tools
+bash <(curl -fsSL https://raw.githubusercontent.com/ingeniosity-A2A/MA-Edge-Computing/main/apps/TailSocks/scripts/install-latest-termux.sh)
+```
+
+If Android blocks the installation, allow **Install unknown apps** for the app used to open the APK, then run the command again. After installation, open TailSocks and sign in. Start with **Proxy** mode to validate tailnet connectivity before enabling VPN/TUN mode.
+
+The downloaded APK is saved under `~/downloads/`. This installer does not grant VPN permission, sign in, configure an exit node, or silently install the APK.
