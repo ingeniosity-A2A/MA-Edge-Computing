@@ -37,14 +37,19 @@ export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
 export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/build-tools/37.0.0:$PATH"
 ```
 
-Build the native Go bridge and daemon binaries first, then the debug APK:
+From the root of the checked-out `MA-Edge-Computing` repository, run the maintained helper. It clones/updates upstream under `apps/TailSocks/upstream`, installs `gomobile` tools at the version pinned by upstream, builds only the `arm64-v8a` native bridge, and assembles the debug APK:
 
 ```bash
-cd appctr
-bash build.sh
-cd ..
-./gradlew :app:assembleDebug
+bash apps/TailSocks/scripts/build-linux.sh
 ```
+
+To install automatically, connect the S26 Ultra by USB, enable USB debugging, and authorize the host:
+
+```bash
+INSTALL=1 bash apps/TailSocks/scripts/build-linux.sh
+```
+
+The helper refuses to install unless exactly one authorized ADB device is connected. Run it on Linux x86_64; the upstream NDK build script is not supported by this helper on Android/Termux.
 
 The upstream debug build uses application ID `io.github.bropines.tailscaled.dev` and is designed to coexist with the release app. Look for the ARM64 APK under `app/build/outputs/apk/debug/` (usually the `app-arm64-v8a-debug.apk` split). Verify the exact output filename with:
 
