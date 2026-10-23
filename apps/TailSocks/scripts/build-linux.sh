@@ -31,7 +31,7 @@ export PATH="$(go env GOPATH)/bin:$PATH"
   exit 1
 }
 [[ -f "$ANDROID_HOME/platforms/android-37/android.jar" ]] || {
-  printf "ERROR: Android SDK platform 37 is missing. Install it with: sdkmanager 'platforms;android-37'.\\n" >&2
+  printf "ERROR: Android SDK platform 37 is missing. Install it with: sdkmanager 'platforms;android-37'.\n" >&2
   exit 1
 }
 [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]] || {
