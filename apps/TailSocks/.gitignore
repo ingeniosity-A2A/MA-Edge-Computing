@@ -1,0 +1,14 @@
+# Optional upstream checkout and generated build artifacts
+upstream/
+vendor/
+.gradle/
+build/
+**/build/
+*.apk
+*.aab
+*.jks
+*.keystore
+local.properties
+.env
+*.state
+tailscaled.state
