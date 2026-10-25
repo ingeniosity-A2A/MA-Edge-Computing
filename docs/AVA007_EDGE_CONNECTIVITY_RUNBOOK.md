@@ -168,3 +168,33 @@ Do not add GoodbyeDPI/ByeDPI as a default dependency. First determine whether th
 - Aperture bridge / ts-unplug: https://tailscale.com/docs/aperture/connect-outside-tailnet
 - OpenSandbox: https://github.com/opensandbox-group/OpenSandbox
 - Android EuiccManager: https://developer.android.com/reference/android/telephony/euicc/EuiccManager
+
+
+## 10. TEAL eSIM and connectivity orchestration
+
+TEAL is a carrier-neutral connectivity/eSIM orchestration platform, not a software modem. If the intended provider is TEAL, integration is an optional control-plane adapter around an eSIM-capable device and a provisioned TEAL/carrier plan.
+
+Before implementing the TEAL adapter, confirm all of the following with the operator account:
+
+- The S26 Ultra model/region and active firmware support the required eSIM profile type and carrier provisioning path.
+- The TEAL account has API access, an approved device/eSIM record, and an active data plan with compatible carrier/APN configuration.
+- The intended API base URL, authentication mechanism, request-ID requirements, callback URL, rate limits, and supported operations are confirmed from the account's current TEAL documentation.
+- Profile installation/activation follows the Android system UI, carrier privileges, TEAL account policy, and applicable GSMA remote-provisioning requirements.
+
+The adapter should initially be read-only: query the authorized eSIM/device status, assigned plan, and usage/status metadata. Use unique request IDs and bounded retries for state-changing API calls. Profile assignment, data enable/suspend, or profile switching must require explicit operator authorization and should never be triggered automatically by a model's free-form output.
+
+Keep TEAL API credentials in a server-side secret store, preferably behind a narrow backend adapter. Do not embed enterprise TEAL credentials in the APK, Termux scripts, prompts, or Git. Do not log EID, ICCID, IMSI, activation codes, or profile payloads. Store only the minimum operational metadata required for diagnostics.
+
+Reference material:
+- TEAL platform: https://teal.io/
+- TEAL API access documentation (account access may be required): https://tealcommunications.atlassian.net/wiki/spaces/TD/pages/843186179/API+Access+to+Teal+Enterprise+Platform
+- Android eSIM architecture: https://source.android.com/docs/core/connect/esim-overview
+
+**Important:** TEAL profile orchestration, Android eSIM APIs, the Qualcomm modem/baseband, Tailscale networking, and the OVH VPS tunnel are five distinct layers. A successful TEAL API call does not prove that the device has active cellular data, and a working Tailscale tunnel does not prove that the eSIM plan is active.
+
+## 11. Acceptance additions
+
+- [ ] TEAL API access and the device's eligibility are confirmed by the account owner/provider.
+- [ ] Read-only status lookup succeeds without exposing subscriber identifiers in logs.
+- [ ] State-changing eSIM operations remain disabled until explicit authorization and rollback/recovery procedures are tested.
+- [ ] The phone establishes cellular data before tailnet tunnel tests begin.
