@@ -198,3 +198,60 @@ Reference material:
 - [ ] Read-only status lookup succeeds without exposing subscriber identifiers in logs.
 - [ ] State-changing eSIM operations remain disabled until explicit authorization and rollback/recovery procedures are tested.
 - [ ] The phone establishes cellular data before tailnet tunnel tests begin.
+
+
+## 12. Executable network bootstrap (committed to `main`)
+
+The first implementation layer is now in `ops/network/`:
+
+- `vps-install-tailscale.sh`: guarded Ubuntu-only installer; enables `tailscaled`, prints service/node state, and leaves authentication interactive. It does not enable exit-node routing, forwarding, subnet routes, or public ports.
+- `edge-preflight.sh`: read-only Termux/Android network diagnostics, DNS/control-plane reachability, optional tailnet IP ping, and optional private health URL check.
+
+### Install Tailscale on the VPS
+
+Review the script, then run on the VPS:
+
+```bash
+git clone https://github.com/ingeniosity-A2A/MA-Edge-Computing.git
+cd MA-Edge-Computing
+sudo bash ops/network/vps-install-tailscale.sh
+```
+
+Authenticate only through the interactive URL that Tailscale prints:
+
+```bash
+sudo tailscale up
+tailscale status
+tailscale ip -4
+```
+
+Do not repeat `tailscale up` with extra flags unless those settings have been explicitly reviewed. This first pass deliberately does not configure an exit node.
+
+### Capture phone diagnostics
+
+On Termux, after confirming the Android Tailscale app is signed in:
+
+```bash
+git clone https://github.com/ingeniosity-A2A/MA-Edge-Computing.git
+cd MA-Edge-Computing
+bash ops/network/edge-preflight.sh
+```
+
+After retrieving the *current* VPS tailnet IP from `tailscale ip -4`, rerun:
+
+```bash
+VPS_TAILNET_IP=100.x.y.z bash ops/network/edge-preflight.sh
+```
+
+Replace the example IP with the real value; do not assume historical IPs are current. A ping failure is not by itself proof that Tailscale is broken because ICMP may be blocked. The final acceptance test must be an authorized TCP/HTTP health request to a service bound to the tailnet interface.
+
+### Current build state
+
+- **Implemented in Git:** the two scripts above and this runbook.
+- **Not yet deployed:** no script has been executed on the OVH VPS or S26 Ultra by this Git commit.
+- **Not yet verified:** the live tailnet membership, private service reachability, DNS, and reconnect behavior.
+- **Next gate:** verify both current tailnet IPs and a successful private TCP health check before starting OpenSandbox or enabling exit-node forwarding.
+
+Official references:
+- Tailscale Linux install and status checks: https://tailscale.com/docs/install/linux
+- OpenSandbox server configuration and API-key behavior: https://open-sandbox.ai/getting-started/configuration
