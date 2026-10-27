@@ -255,3 +255,28 @@ Replace the example IP with the real value; do not assume historical IPs are cur
 Official references:
 - Tailscale Linux install and status checks: https://tailscale.com/docs/install/linux
 - OpenSandbox server configuration and API-key behavior: https://open-sandbox.ai/getting-started/configuration
+
+
+## 13. Provider decision: TEAL is not a network dependency
+
+**Decision:** TEAL is excluded from the production network's critical path. Marketing claims, API documentation, or an AI-focused product narrative are not evidence that a compatible, working cellular service can be provisioned on this S26 Ultra. No TEAL-specific integration work should block the network build.
+
+The core network must operate independently of any eSIM orchestration vendor:
+
+1. **Upstream:** an already-working physical SIM or eSIM data plan from a carrier that is confirmed to support this exact device and region.
+2. **Device networking:** Android's native cellular stack and the official Tailscale Android VPN client.
+3. **Private transport:** Tailscale tailnet connectivity to the OVH VPS.
+4. **VPS egress and services:** configured separately, with firewall and forwarding enabled only after explicit verification.
+5. **Optional eSIM control plane:** a provider adapter may be evaluated later, but it remains disabled until a real device/plan activation test succeeds.
+
+### Acceptance gate for any future eSIM vendor
+
+Do not write a vendor integration based on marketing alone. Require all of the following first:
+
+- Written confirmation of support for the exact device model, carrier profile, geography, and intended use.
+- A real test plan and pricing, plus documented provisioning/API access.
+- Successful activation on the actual device, with Android showing the profile and a working cellular data session.
+- A repeatable test proving connectivity after reboot and after leaving/re-entering coverage.
+- Clear rollback and support procedures, with no credentials or activation secrets stored in the app or repository.
+
+Until all gates pass, mark the vendor **unvalidated** and do not make its API a runtime dependency. The baseline build proceeds using a verified carrier connection and Tailscale.
