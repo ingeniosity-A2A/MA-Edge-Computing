@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fapo-ran-capability"
+version = "0.1.0"
+description = "Exoskeleton RAN Capability: FAPO policy optimizer behind a capability boundary, with a real srsRAN control-socket adapter, safety envelope, and digital twin."
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+fapo-loop = "ran_capability.cli:main"
+
+[tool.setuptools]
+packages = ["ran_capability", "ran_capability.srsran", "ava007"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,124 @@
+From 7043a6413c3a769799d8872bacccd8b2aae4e96c Mon Sep 17 00:00:00 2001
+From: FAPO Integration <fapo-dev@example.local>
+Date: Sat, 12 Sep 2026 04:05:19 +0000
+Subject: [PATCH 1/4] scheduler: add FAPO control expert configuration
+
+Add the configuration of an optional FAPO (Fast Autonomous Policy
+Optimizer) control interface to the scheduler expert configuration.
+
+When enabled, the scheduler exposes a JSON control socket that publishes
+per-slice scheduling telemetry and allows an external controller to
+adjust the per-slice RB limits at runtime. The configuration includes
+the endpoint (TCP or Unix socket, loopback enforced by default), the
+telemetry publication period and the parameters used to derive the
+exposed service rates and queue occupancy metrics.
+---
+ .../config/scheduler_expert_config.h          | 35 +++++++++++++++++--
+ .../scheduler_expert_config_validator.h       | 32 ++++++++++++++++-
+ 2 files changed, 64 insertions(+), 3 deletions(-)
+
+diff --git a/include/srsran/scheduler/config/scheduler_expert_config.h b/include/srsran/scheduler/config/scheduler_expert_config.h
+index 5bf72c8..9543fef 100644
+--- a/include/srsran/scheduler/config/scheduler_expert_config.h
++++ b/include/srsran/scheduler/config/scheduler_expert_config.h
+@@ -35,6 +35,7 @@
+ #include "srsran/ran/sib/sib_configuration.h"
+ #include "srsran/ran/slot_pdu_capacity_constants.h"
+ #include <chrono>
++#include <string>
+ #include <variant>
+ #include <vector>
+ 
+@@ -250,14 +251,44 @@ struct scheduler_paging_expert_config {
+   unsigned          max_paging_retries  = 2;
+ };
+ 
++/// \brief Configuration of the FAPO control interface, an optional JSON control socket that exposes per-slice
++/// scheduler telemetry and allows an external controller to adjust the per-slice RB limits at runtime.
++///
++/// When enabled, the scheduler runs a control server on a dedicated (non real-time) thread. Telemetry snapshots are
++/// published by the slot thread into a lock-free store, and control commands are applied by the slot thread at slot
++/// boundaries via the same code path used for slice reconfigurations.
++struct fapo_control_expert_config {
++  /// Enable the FAPO control server.
++  bool enabled = false;
++  /// Endpoint the control server listens on: "tcp://host:port" or "unix:///path/to/socket".
++  std::string endpoint = "tcp://127.0.0.1:4445";
++  /// Whether the TCP endpoint is allowed to bind on a non-loopback address. Unix endpoints are unaffected.
++  bool allow_remote = false;
++  /// Periodicity of telemetry snapshot publication by the slot thread.
++  std::chrono::milliseconds telemetry_period{1000};
++  /// Maximum number of concurrently connected control clients.
++  unsigned max_clients = 4;
++  /// Reference queue size, in bytes, used to normalize the per-slice queue depth to a 0..100 congestion percentage.
++  unsigned queue_ref_bytes = 1000000;
++  /// Transport block bytes per granted RB per slot, used to estimate service rates and queueing latencies.
++  unsigned tb_bytes_per_rb_slot = 200;
++  /// \brief Nominal cell TX power, in dBm, reported in the telemetry.
++  /// \remark The scheduler has no runtime control over TX power; FAPO power actions are advisory only.
++  unsigned nominal_tx_power_dbm = 0;
++  /// Upper bound, in ms, reported as the slice max latency policy.
++  unsigned max_latency_ms = 1000;
++};
++
+ /// \brief Scheduling statically configurable expert parameters.
+ struct scheduler_expert_config {
+   scheduler_si_expert_config     si;
+   scheduler_ra_expert_config     ra;
+   scheduler_paging_expert_config pg;
+   scheduler_ue_expert_config     ue;
+-  bool                           log_broadcast_messages       = false;
+-  bool                           log_high_latency_diagnostics = false;
++  /// FAPO control interface configuration.
++  fapo_control_expert_config    fapo;
++  bool                          log_broadcast_messages       = false;
++  bool                          log_high_latency_diagnostics = false;
+ };
+ 
+ } // namespace srsran
+diff --git a/include/srsran/scheduler/config/scheduler_expert_config_validator.h b/include/srsran/scheduler/config/scheduler_expert_config_validator.h
+index 002250a..6651db1 100644
+--- a/include/srsran/scheduler/config/scheduler_expert_config_validator.h
++++ b/include/srsran/scheduler/config/scheduler_expert_config_validator.h
+@@ -35,7 +35,37 @@ namespace srsran {
+ /// \return In case an invalid parameter is detected, returns a string containing an error message.
+ inline error_type<std::string> is_scheduler_expert_config_valid(const scheduler_expert_config& config)
+ {
+-  // :TODO: Implement me!
++  // FAPO control configuration.
++  const fapo_control_expert_config& fapo = config.fapo;
++  if (fapo.enabled) {
++    if (fapo.telemetry_period <= std::chrono::milliseconds{0}) {
++      return std::string("FAPO control telemetry period must be greater than zero");
++    }
++    if (fapo.max_clients == 0 or fapo.max_clients > 16) {
++      return std::string("FAPO control max_clients must be in the range [1, 16]");
++    }
++    if (fapo.queue_ref_bytes == 0) {
++      return std::string("FAPO control queue_ref_bytes must be greater than zero");
++    }
++    if (fapo.tb_bytes_per_rb_slot == 0) {
++      return std::string("FAPO control tb_bytes_per_rb_slot must be greater than zero");
++    }
++    const std::string& endpoint = fapo.endpoint;
++    const auto         is_loopback = [](const std::string& host) {
++      return host == "127.0.0.1" or host == "localhost" or host == "::1" or host == "localhost6";
++    };
++    if (endpoint.rfind("tcp://", 0) == 0) {
++      std::string host = endpoint.substr(6, endpoint.rfind(':') == std::string::npos
++                                               ? std::string::npos
++                                               : endpoint.rfind(':') - 6);
++      if (not fapo.allow_remote and not is_loopback(host)) {
++        return std::string("FAPO control TCP endpoint must bind on a loopback address (or set allow_remote=true)");
++      }
++    } else if (endpoint.rfind("unix:///", 0) != 0) {
++      return std::string("FAPO control endpoint must be of the form \"tcp://host:port\" or \"unix:///path\"");
++    }
++  }
++
+   return {};
+ }
+ 
+-- 
+2.47.3
+

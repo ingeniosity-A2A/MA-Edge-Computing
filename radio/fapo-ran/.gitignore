@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# test / tooling caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# local build outputs (srsRAN fixture binaries etc.)
+fapo_interop_server
+*.o
+*.so

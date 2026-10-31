@@ -14,3 +14,9 @@ Edge runtime projects for the Samsung Galaxy S26 Ultra and Ingeniosity's on-devi
 - [Tailscale Android SDK](apps/Tailscale-Android-SDK/README.md) — isolated build of the upstream Android client and reusable libtailscale AAR.
 
 Each app owns its Android/Gradle build configuration. Do not merge app-specific dependencies into another app just to share a build.
+
+## RAN and radio stack
+
+- [FAPO RAN Capability](radio/fapo-ran/README.md) — Lyapunov drift-plus-penalty radio policy optimizer, isolated RAN capability API, safety envelope, srsRAN JSON-Lines control adapter, digital twin, interoperability tooling, and the pinned srsRAN Project patch series.
+
+FAPO controls a separately deployed srsRAN gNB through its adapter. It does not turn the Galaxy S26 Ultra's Qualcomm handset modem into a programmable gNodeB. The handset remains a UE; real RAN operation requires a supported SDR/RF front end, the patched srsRAN Project build, and a properly authorized test network. Start with the digital twin before connecting radio hardware.

@@ -1,0 +1,1835 @@
+From b10c1d8fe14464407fc7f9aba2037f6760ee3142 Mon Sep 17 00:00:00 2001
+From: FAPO Integration <fapo-dev@example.local>
+Date: Sat, 12 Sep 2026 04:05:19 +0000
+Subject: [PATCH 2/4] scheduler: add FAPO control server and integrate it into
+ the scheduler
+
+Add lib/scheduler/fapo, a self-contained FAPO v1 control interface
+(JSON Lines over TCP or Unix socket):
+
+* fapo_telemetry.h: telemetry snapshots of the per-slice scheduler state
+  (RB limits, priorities, pending DL/UL bytes, allocation rates,
+  HARQ-derived loss) exchanged through a seqlock store (writer: slot
+  thread, reader: control thread) and an MPMC command queue used to
+  forward control actions to the slot loop.
+
+* fapo_control_server: control server running on a dedicated non
+  real-time thread. Implements the FAPO v1 protocol ops (hello, ping,
+  get_telemetry, apply, reset) with per-slice validation and clamping of
+  the requested RB limits to the cell capacity. The radio remains the
+  source of truth: the effective policies are always echoed back in the
+  telemetry.
+
+* inter_slice_scheduler: collect real per-slice telemetry snapshots,
+  apply new slice max RB limits (preserving the dedicated <= min <= max
+  invariant) and restore the slice policies they were instantiated with
+  on reset.
+
+* ran_slice_instance: keep a copy of the baseline RRM policy
+  configuration for the FAPO reset.
+
+* ue_event_manager: cumulative DL HARQ ACK/NACK counters used to derive
+  a real cell packet loss estimate.
+
+* ue_scheduler_impl: publish telemetry snapshots and drain the pending
+  control commands from the slot loop (non-blocking; commands are
+  applied directly in the slot thread that owns the slice state).
+  Commands targeting cells of other cell groups are pushed back into
+  the shared queue.
+
+* scheduler_impl: instantiate the FAPO context and control server when
+  enabled and pass them to the cell group schedulers.
+---
+ lib/scheduler/CMakeLists.txt                  |    1 +
+ lib/scheduler/fapo/fapo_control_server.cpp    | 1010 +++++++++++++++++
+ lib/scheduler/fapo/fapo_control_server.h      |   90 ++
+ lib/scheduler/fapo/fapo_telemetry.h           |  199 ++++
+ lib/scheduler/scheduler_impl.cpp              |   22 +-
+ lib/scheduler/scheduler_impl.h                |    9 +
+ .../slicing/inter_slice_scheduler.cpp         |   84 ++
+ lib/scheduler/slicing/inter_slice_scheduler.h |   17 +
+ lib/scheduler/slicing/ran_slice_instance.cpp  |    1 +
+ lib/scheduler/slicing/ran_slice_instance.h    |    5 +-
+ .../ue_scheduling/ue_event_manager.cpp        |    5 +
+ .../ue_scheduling/ue_event_manager.h          |    8 +
+ .../ue_scheduling/ue_scheduler_impl.cpp       |   76 +-
+ .../ue_scheduling/ue_scheduler_impl.h         |   26 +-
+ 14 files changed, 1548 insertions(+), 5 deletions(-)
+ create mode 100644 lib/scheduler/fapo/fapo_control_server.cpp
+ create mode 100644 lib/scheduler/fapo/fapo_control_server.h
+ create mode 100644 lib/scheduler/fapo/fapo_telemetry.h
+
+diff --git a/lib/scheduler/CMakeLists.txt b/lib/scheduler/CMakeLists.txt
+index 7ed1dd2..bc39036 100644
+--- a/lib/scheduler/CMakeLists.txt
++++ b/lib/scheduler/CMakeLists.txt
+@@ -38,6 +38,7 @@ set(SOURCES
+         pucch_scheduling/pucch_resource_manager.cpp
+         uci_scheduling/uci_scheduler_impl.cpp
+         uci_scheduling/uci_allocator_impl.cpp
++        fapo/fapo_control_server.cpp
+         slicing/inter_slice_scheduler.cpp
+         slicing/ran_slice_instance.cpp
+         slicing/slice_ue_repository.cpp
+diff --git a/lib/scheduler/fapo/fapo_control_server.cpp b/lib/scheduler/fapo/fapo_control_server.cpp
+new file mode 100644
+index 0000000..ab36e79
+--- /dev/null
++++ b/lib/scheduler/fapo/fapo_control_server.cpp
+@@ -0,0 +1,1010 @@
++/*
++ *
++ * Copyright 2021-2025 Software Radio Systems Limited
++ *
++ * This file is part of srsRAN.
++ *
++ * srsRAN is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU Affero General Public License as
++ * published by the Free Software Foundation, either version 3 of
++ * the License, or (at your option) any later version.
++ *
++ * srsRAN is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU Affero General Public License for more details.
++ *
++ * A copy of the GNU Affero General Public License can be found in
++ * the LICENSE file in the top-level directory of this distribution
++ * and at http://www.gnu.org/licenses/.
++ *
++ */
++
++#include "fapo_control_server.h"
++#include "srsran/adt/static_vector.h"
++#include "srsran/scheduler/config/scheduler_expert_config.h"
++#include "srsran/srslog/srslog.h"
++#include <algorithm>
++#include <cerrno>
++#include <cmath>
++#include <cstdlib>
++#include <cstring>
++#include <stdexcept>
++#include <fmt/format.h>
++#include <fcntl.h>
++#include <netdb.h>
++#include <poll.h>
++#include <unistd.h>
++#include <arpa/inet.h>
++#include <netinet/in.h>
++#include <netinet/tcp.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++
++using namespace srsran;
++
++namespace {
++
++/// FAPO control protocol version implemented by this server.
++constexpr unsigned FAPO_PROTOCOL_VERSION = 1;
++
++/// Server name reported in the hello response (matches the FAPO v1 protocol definition).
++constexpr const char* FAPO_SERVER_NAME = "srsran-fapo-control";
++
++/// Maximum size of a partially received request line before the client is disconnected.
++constexpr size_t FAPO_MAX_LINE_SIZE = 1U << 20;
++
++// -------------------------------------------------------------------------------------------
++// Minimal JSON value tree and parser (no exceptions, no external dependencies).
++// -------------------------------------------------------------------------------------------
++
++struct jval {
++  enum class type_t { nul, boolean, number, str, arr, obj };
++
++  type_t                                     type = type_t::nul;
++  bool                                       b    = false;
++  double                                     num  = 0;
++  std::string                                str;
++  std::vector<jval>                          arr;
++  std::vector<std::pair<std::string, jval>>  obj;
++
++  const jval* find(const char* key) const
++  {
++    if (type != type_t::obj) {
++      return nullptr;
++    }
++    for (const auto& kv : obj) {
++      if (kv.first == key) {
++        return &kv.second;
++      }
++    }
++    return nullptr;
++  }
++};
++
++/// Minimal recursive-descent JSON parser. Returns false on malformed input.
++struct jparser {
++  const char* p;
++  const char* end;
++
++  bool parse(jval& out)
++  {
++    skip_ws();
++    if (!parse_value(out)) {
++      return false;
++    }
++    skip_ws();
++    return p == end;
++  }
++
++  void skip_ws()
++  {
++    while (p != end and (*p == ' ' or *p == '\t' or *p == '\r' or *p == '\n')) {
++      ++p;
++    }
++  }
++
++  bool parse_value(jval& out)
++  {
++    if (p == end) {
++      return false;
++    }
++    switch (*p) {
++      case '{':
++        return parse_obj(out);
++      case '[':
++        return parse_arr(out);
++      case '"': {
++        out.type = jval::type_t::str;
++        return parse_string(out.str);
++      }
++      case 't':
++        return parse_lit("true", out, jval::type_t::boolean, true);
++      case 'f':
++        return parse_lit("false", out, jval::type_t::boolean, false);
++      case 'n':
++        return parse_lit("null", out, jval::type_t::nul, false);
++      default:
++        return parse_num(out);
++    }
++  }
++
++  bool parse_lit(const char* lit, jval& out, jval::type_t t, bool bval)
++  {
++    size_t len = std::strlen(lit);
++    if (static_cast<size_t>(end - p) < len or std::memcmp(p, lit, len) != 0) {
++      return false;
++    }
++    p += len;
++    out.type = t;
++    out.b    = bval;
++    return true;
++  }
++
++  bool parse_num(jval& out)
++  {
++    char*        endptr = nullptr;
++    const char*  start  = p;
++    double       v      = std::strtod(start, &endptr);
++    if (endptr == start) {
++      return false;
++    }
++    // strtod may read beyond the buffer end if the number is at the very end of a non-null-terminated region.
++    // The input buffer is guaranteed to be null-terminated by the caller, so this is safe.
++    p        = endptr;
++    out.type = jval::type_t::number;
++    out.num  = v;
++    return true;
++  }
++
++  bool parse_string(std::string& out)
++  {
++    if (p == end or *p != '"') {
++      return false;
++    }
++    ++p;
++    out.clear();
++    while (p != end) {
++      char c = *p++;
++      if (c == '"') {
++        return true;
++      }
++      if (c != '\\') {
++        out.push_back(c);
++        continue;
++      }
++      if (p == end) {
++        return false;
++      }
++      char esc = *p++;
++      switch (esc) {
++        case '"':
++          out.push_back('"');
++          break;
++        case '\\':
++          out.push_back('\\');
++          break;
++        case '/':
++          out.push_back('/');
++          break;
++        case 'b':
++          out.push_back('\b');
++          break;
++        case 'f':
++          out.push_back('\f');
++          break;
++        case 'n':
++          out.push_back('\n');
++          break;
++        case 'r':
++          out.push_back('\r');
++          break;
++        case 't':
++          out.push_back('\t');
++          break;
++        case 'u': {
++          if (end - p < 4) {
++            return false;
++          }
++          unsigned cp = 0;
++          for (unsigned i = 0; i != 4; ++i) {
++            char  h  = *p++;
++            cp      = (cp << 4U) + (h >= '0' and h <= '9' ? static_cast<unsigned>(h - '0')
++                                                          : (h >= 'a' and h <= 'f' ? static_cast<unsigned>(h - 'a' + 10)
++                                                                                   : (h >= 'A' and h <= 'F' ? static_cast<unsigned>(h - 'A' + 10)
++                                                                                                            : 0xFFFFFFFFU)));
++            if (cp == 0xFFFFFFFFU) {
++              return false;
++            }
++          }
++          // Encode the codepoint as UTF-8 (surrogate pairs are not required for the FAPO protocol).
++          if (cp < 0x80U) {
++            out.push_back(static_cast<char>(cp));
++          } else if (cp < 0x800U) {
++            out.push_back(static_cast<char>(0xC0U | (cp >> 6U)));
++            out.push_back(static_cast<char>(0x80U | (cp & 0x3FU)));
++          } else {
++            out.push_back(static_cast<char>(0xE0U | (cp >> 12U)));
++            out.push_back(static_cast<char>(0x80U | ((cp >> 6U) & 0x3FU)));
++            out.push_back(static_cast<char>(0x80U | (cp & 0x3FU)));
++          }
++          break;
++        }
++        default:
++          return false;
++      }
++    }
++    return false;
++  }
++
++  bool parse_arr(jval& out)
++  {
++    out.type = jval::type_t::arr;
++    ++p; // consume '['
++    skip_ws();
++    if (p != end and *p == ']') {
++      ++p;
++      return true;
++    }
++    while (true) {
++      skip_ws();
++      out.arr.emplace_back();
++      if (!parse_value(out.arr.back())) {
++        return false;
++      }
++      skip_ws();
++      if (p == end) {
++        return false;
++      }
++      if (*p == ',') {
++        ++p;
++        continue;
++      }
++      if (*p == ']') {
++        ++p;
++        return true;
++      }
++      return false;
++    }
++  }
++
++  bool parse_obj(jval& out)
++  {
++    out.type = jval::type_t::obj;
++    ++p; // consume '{'
++    skip_ws();
++    if (p != end and *p == '}') {
++      ++p;
++      return true;
++    }
++    while (true) {
++      skip_ws();
++      std::string key;
++      if (!parse_string(key)) {
++        return false;
++      }
++      skip_ws();
++      if (p == end or *p != ':') {
++        return false;
++      }
++      ++p;
++      skip_ws();
++      jval item;
++      if (!parse_value(item)) {
++        return false;
++      }
++      out.obj.emplace_back(std::move(key), std::move(item));
++      skip_ws();
++      if (p == end) {
++        return false;
++      }
++      if (*p == ',') {
++        ++p;
++        continue;
++      }
++      if (*p == '}') {
++        ++p;
++        return true;
++      }
++      return false;
++    }
++  }
++};
++
++// -------------------------------------------------------------------------------------------
++// JSON writing helpers.
++// -------------------------------------------------------------------------------------------
++
++void json_escape(fmt::memory_buffer& buf, const std::string& s)
++{
++  buf.push_back('"');
++  for (char c : s) {
++    switch (c) {
++      case '"':
++        fmt::format_to(fmt::appender(buf), "\\\"");
++        break;
++      case '\\':
++        fmt::format_to(fmt::appender(buf), "\\\\");
++        break;
++      case '\n':
++        fmt::format_to(fmt::appender(buf), "\\n");
++        break;
++      case '\r':
++        fmt::format_to(fmt::appender(buf), "\\r");
++        break;
++      case '\t':
++        fmt::format_to(fmt::appender(buf), "\\t");
++        break;
++      default:
++        if (static_cast<unsigned char>(c) < 0x20U) {
++          fmt::format_to(fmt::appender(buf), "\\u{:04x}", c);
++        } else {
++          buf.push_back(c);
++        }
++    }
++  }
++  buf.push_back('"');
++}
++
++/// Formats a double that represents a protocol request id: integers without a decimal part.
++void fmt_request_id(fmt::memory_buffer& buf, double id)
++{
++  if (id == static_cast<double>(static_cast<long long>(id)) and std::fabs(id) < 9.0e15) {
++    fmt::format_to(fmt::appender(buf), "{}", static_cast<long long>(id));
++    return;
++  }
++  fmt::format_to(fmt::appender(buf), "{}", id);
++}
++
++} // namespace
++
++// -------------------------------------------------------------------------------------------
++// fapo_control_server
++// -------------------------------------------------------------------------------------------
++
++namespace srsran {
++
++fapo_control_server::fapo_control_server(const fapo_control_expert_config& cfg_, fapo_context& ctx_) :
++  cfg(cfg_), ctx(ctx_), logger(srslog::fetch_basic_logger("FAPO"))
++{
++  ctrl_thread = std::thread([this]() { run(); });
++}
++
++fapo_control_server::~fapo_control_server()
++{
++  stop_flag.store(true, std::memory_order_release);
++  if (ctrl_thread.joinable()) {
++    ctrl_thread.join();
++  }
++}
++
++static int open_listen_tcp(const char* host, unsigned port, srslog::basic_logger& logger)
++{
++  struct addrinfo hints{};
++  hints.ai_family   = AF_UNSPEC;
++  hints.ai_socktype = SOCK_STREAM;
++  hints.ai_flags    = AI_PASSIVE | AI_NUMERICHOST;
++  hints.ai_protocol = IPPROTO_TCP;
++
++  char port_str[8];
++  std::snprintf(port_str, sizeof(port_str), "%u", port);
++
++  struct addrinfo* res = nullptr;
++  int                    rc  = ::getaddrinfo(host, port_str, &hints, &res);
++  if (rc != 0 or res == nullptr) {
++    // Retry allowing name resolution (e.g. "localhost").
++    hints.ai_flags = AI_PASSIVE;
++    rc             = ::getaddrinfo(host, port_str, &hints, &res);
++    if (rc != 0 or res == nullptr) {
++      logger.error("FAPO control server: failed to resolve listen address \"{}:{}\"", host, port);
++      return -1;
++    }
++  }
++
++  int fd = -1;
++  for (struct addrinfo* ai = res; ai != nullptr; ai = ai->ai_next) {
++    fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
++    if (fd < 0) {
++      continue;
++    }
++    int one = 1;
++    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
++    if (::bind(fd, ai->ai_addr, ai->ai_addrlen) == 0 and ::listen(fd, 8) == 0) {
++      break;
++    }
++    ::close(fd);
++    fd = -1;
++  }
++  ::freeaddrinfo(res);
++
++  if (fd >= 0) {
++    logger.info("FAPO control server: listening on tcp://{}:{}", host, port);
++  } else {
++    logger.error("FAPO control server: failed to bind tcp://{}:{}. Cause: {}", host, port, strerror(errno));
++  }
++  return fd;
++}
++
++static int open_listen_unix(const char* path, srslog::basic_logger& logger)
++{
++  int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
++  if (fd < 0) {
++    logger.error("FAPO control server: failed to create unix socket. Cause: {}", strerror(errno));
++    return -1;
++  }
++  struct sockaddr_un addr{};
++  addr.sun_family = AF_UNIX;
++  std::strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
++  ::unlink(path);
++  if (::bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0 or ::listen(fd, 8) != 0) {
++    logger.error("FAPO control server: failed to bind unix://{}. Cause: {}", path, strerror(errno));
++    ::close(fd);
++    return -1;
++  }
++  logger.info("FAPO control server: listening on unix://{}", path);
++  return fd;
++}
++
++void fapo_control_server::run()
++{
++  // Parse the endpoint.
++  std::string endpoint = cfg.endpoint;
++  if (endpoint.rfind("tcp://", 0) == 0) {
++    std::string rest = endpoint.substr(6);
++    auto        sep  = rest.rfind(':');
++    if (sep == std::string::npos) {
++      logger.error("FAPO control server: invalid tcp endpoint \"{}\"", endpoint);
++      return;
++    }
++    std::string host    = rest.substr(0, sep);
++    unsigned    port    = 0;
++    try {
++      port = static_cast<unsigned>(std::stoul(rest.substr(sep + 1)));
++    } catch (const std::exception&) {
++      logger.error("FAPO control server: invalid port in endpoint \"{}\"", endpoint);
++      return;
++    }
++    if (not cfg.allow_remote and host != "127.0.0.1" and host != "localhost" and host != "::1") {
++      // Defense in depth: the validator already rejects this configuration.
++      logger.error("FAPO control server: refusing to listen on non-loopback address \"{}\" (allow_remote=false)", host);
++      return;
++    }
++    listen_fd = open_listen_tcp(host.c_str(), port, logger);
++  } else if (endpoint.rfind("unix:///", 0) == 0) {
++    unix_sock_path = endpoint.substr(7);
++    listen_fd      = open_listen_unix(unix_sock_path.c_str(), logger);
++  } else {
++    logger.error("FAPO control server: unsupported endpoint \"{}\"", endpoint);
++    return;
++  }
++  if (listen_fd < 0) {
++    return;
++  }
++
++  // The listen socket must be non-blocking, otherwise accept() can block the server loop
++  // (and the server thread shutdown) indefinitely.
++  {
++    int flags = ::fcntl(listen_fd, F_GETFL, 0);
++    ::fcntl(listen_fd, F_SETFL, flags | O_NONBLOCK);
++  }
++
++  // Server loop state.
++  std::array<client_state, 16>          clients;
++  std::array<struct pollfd, 16 + 1>     pfds;
++  const unsigned                        max_clients = std::min<unsigned>(clients.size(), cfg.max_clients);
++
++  while (not stop_flag.load(std::memory_order_acquire)) {
++    nfds_t nfds = 0;
++    pfds[nfds].fd      = listen_fd;
++    pfds[nfds].events  = POLLIN;
++    pfds[nfds].revents = 0;
++    ++nfds;
++    for (unsigned i = 0; i != max_clients; ++i) {
++      if (clients[i].fd < 0) {
++        continue;
++      }
++      short ev = POLLIN;
++      if (not clients[i].outbuf.empty()) {
++        ev |= POLLOUT;
++      }
++      pfds[nfds].fd      = clients[i].fd;
++      pfds[nfds].events  = ev;
++      pfds[nfds].revents = 0;
++      ++nfds;
++    }
++
++    int pret = ::poll(pfds.data(), nfds, 200);
++    if (pret < 0) {
++      if (errno == EINTR) {
++        continue;
++      }
++      logger.error("FAPO control server: poll failed. Cause: {}", strerror(errno));
++      break;
++    }
++    if (pret == 0) {
++      continue;
++    }
++
++    // Handle readable listen socket (accept new clients).
++    if (pfds[0].revents & POLLIN) {
++      while (true) {
++        int cfd = ::accept(listen_fd, nullptr, nullptr);
++        if (cfd < 0) {
++          if (errno == EAGAIN or errno == EWOULDBLOCK) {
++            break;
++          }
++          logger.error("FAPO control server: accept failed. Cause: {}", strerror(errno));
++          break;
++        }
++        int slot = -1;
++        for (unsigned i = 0; i != max_clients and slot < 0; ++i) {
++          if (clients[i].fd < 0) {
++            slot = static_cast<int>(i);
++          }
++        }
++        if (slot < 0) {
++          logger.warning("FAPO control server: rejecting incoming connection. Cause: too many clients");
++          ::close(cfd);
++          continue;
++        }
++        // Non-blocking socket.
++        int flags = ::fcntl(cfd, F_GETFL, 0);
++        ::fcntl(cfd, F_SETFL, flags | O_NONBLOCK);
++        int one = 1;
++        ::setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
++        clients[slot].fd     = cfd;
++        clients[slot].inbuf.clear();
++        clients[slot].outbuf.clear();
++        logger.info("FAPO control server: client connected");
++      }
++    }
++
++    // Handle client sockets.
++    for (unsigned i = 0; i != max_clients; ++i) {
++      client_state& cl = clients[i];
++      if (cl.fd < 0) {
++        continue;
++      }
++      struct pollfd* pe = nullptr;
++      for (nfds_t j = 1; j != nfds; ++j) {
++        if (pfds[j].fd == cl.fd) {
++          pe = &pfds[j];
++          break;
++        }
++      }
++      if (pe == nullptr) {
++        continue;
++      }
++
++      bool close_client = (pe->revents & (POLLHUP | POLLERR | POLLNVAL)) != 0;
++
++      if ((pe->revents & POLLIN) != 0 and not close_client) {
++        char buf[4096];
++        while (true) {
++          ssize_t n = ::recv(cl.fd, buf, sizeof(buf), MSG_DONTWAIT);
++          if (n < 0) {
++            if (errno == EAGAIN or errno == EWOULDBLOCK) {
++              break;
++            }
++            close_client = true;
++            break;
++          }
++          if (n == 0) {
++            close_client = true;
++            break;
++          }
++          cl.inbuf.append(buf, static_cast<size_t>(n));
++          if (cl.inbuf.size() > FAPO_MAX_LINE_SIZE) {
++            logger.warning("FAPO control server: client request line too long, disconnecting");
++            close_client = true;
++            break;
++          }
++          // Extract and process complete lines.
++          size_t pos = 0;
++          while (not close_client) {
++            size_t nl = cl.inbuf.find('\n', pos);
++            if (nl == std::string::npos) {
++              break;
++            }
++            std::string line = cl.inbuf.substr(pos, nl - pos);
++            pos              = nl + 1;
++            bool do_close    = false;
++            std::string resp = handle_line(line, do_close);
++            resp.push_back('\n');
++            cl.outbuf.append(resp);
++            close_client = do_close;
++          }
++          cl.inbuf.erase(0, pos);
++          if (close_client) {
++            break;
++          }
++        }
++      }
++
++      if ((pe->revents & POLLOUT) != 0 and not close_client and not cl.outbuf.empty()) {
++        ssize_t n = ::send(cl.fd, cl.outbuf.data(), cl.outbuf.size(), MSG_NOSIGNAL | MSG_DONTWAIT);
++        if (n < 0) {
++          if (errno != EAGAIN and errno != EWOULDBLOCK) {
++            close_client = true;
++          }
++        } else {
++          cl.outbuf.erase(0, static_cast<size_t>(n));
++        }
++      }
++
++      if (close_client) {
++        ::close(cl.fd);
++        cl.fd = -1;
++        logger.info("FAPO control server: client disconnected");
++      }
++    }
++  }
++
++  for (auto& cl : clients) {
++    if (cl.fd >= 0) {
++      ::close(cl.fd);
++      cl.fd = -1;
++    }
++  }
++  ::close(listen_fd);
++  listen_fd = -1;
++  if (not unix_sock_path.empty()) {
++    ::unlink(unix_sock_path.c_str());
++  }
++  logger.info("FAPO control server: stopped");
++}
++
++std::string fapo_control_server::handle_line(const std::string& line, bool& close_client)
++{
++  close_client = false;
++
++  // Parse the request. A malformed line is answered with a bad_request error and a null id.
++  jval req;
++  {
++    std::string nul_terminated = line;
++    jparser     parser{nul_terminated.c_str(), nul_terminated.c_str() + nul_terminated.size()};
++    if (!parser.parse(req)) {
++      fmt::memory_buffer buf;
++      fmt::format_to(fmt::appender(buf), "{{\"v\":{},\"id\":null,\"ok\":false,\"error\":{{\"code\":\"bad_request\","
++                                        "\"message\":\"line is not valid JSON\"}}}}",
++                     FAPO_PROTOCOL_VERSION);
++      return fmt::to_string(buf);
++    }
++  }
++
++  const jval* vid  = req.find("v");
++  const jval* vidn = req.find("id");
++  const jval* vop  = req.find("op");
++
++  double req_id = (vidn != nullptr and vidn->type == jval::type_t::number) ? vidn->num : 0;
++
++  // Helper lambdas to build responses.
++  auto make_error = [&](const char* code, const std::string& message) {
++    fmt::memory_buffer buf;
++    fmt::format_to(fmt::appender(buf), "{{\"v\":{},\"id\":", FAPO_PROTOCOL_VERSION);
++    fmt_request_id(buf, req_id);
++    fmt::format_to(fmt::appender(buf), ",\"ok\":false,\"error\":{{\"code\":\"{}\",\"message\":", code);
++    json_escape(buf, message);
++    fmt::format_to(fmt::appender(buf), "}}}}");
++    return fmt::to_string(buf);
++  };
++  auto make_ok_prefix = [&]() {
++    fmt::memory_buffer buf;
++    fmt::format_to(fmt::appender(buf), "{{\"v\":{},\"id\":", FAPO_PROTOCOL_VERSION);
++    fmt_request_id(buf, req_id);
++    fmt::format_to(fmt::appender(buf), ",\"ok\":true,");
++    return buf;
++  };
++
++  if (vid == nullptr or vid->type != jval::type_t::number or static_cast<unsigned>(vid->num) != FAPO_PROTOCOL_VERSION) {
++    return make_error("version_mismatch", "unsupported protocol version");
++  }
++  if (vop == nullptr or vop->type != jval::type_t::str) {
++    return make_error("bad_request", "missing or invalid \"op\" field");
++  }
++
++  const std::string& op = vop->str;
++
++  if (op == "hello") {
++    auto buf = make_ok_prefix();
++    fmt::format_to(fmt::appender(buf), "\"server\":\"{}\",\"protocol\":{},\"capabilities\":[\"telemetry\",\"apply\","
++                                      "\"reset\"]}}",
++                   FAPO_SERVER_NAME,
++                   FAPO_PROTOCOL_VERSION);
++    return fmt::to_string(buf);
++  }
++  if (op == "ping") {
++    auto buf = make_ok_prefix();
++    fmt::format_to(fmt::appender(buf), "\"pong\":true}}");
++    return fmt::to_string(buf);
++  }
++  if (op == "get_telemetry") {
++    auto buf = make_ok_prefix();
++    std::string tel = build_telemetry_json();
++    buf.append(tel.data(), tel.data() + tel.size());
++    fmt::format_to(fmt::appender(buf), "}}");
++    return fmt::to_string(buf);
++  }
++  if (op == "reset") {
++    // Enqueue one reset command per active cell.
++    fapo_cell_snapshot snap;
++    unsigned           nof_cells = 0;
++    for (unsigned cell_idx = 0; cell_idx != MAX_NOF_DU_CELLS; ++cell_idx) {
++      if (ctx.telemetry.read(to_du_cell_index(cell_idx), snap) and snap.active) {
++        fapo_command cmd;
++        cmd.cell_index = to_du_cell_index(cell_idx);
++        cmd.reset      = true;
++        if (not ctx.commands.try_push(cmd)) {
++          logger.warning("FAPO control server: command queue full, dropping reset command");
++        } else {
++          ++nof_cells;
++        }
++      }
++    }
++    if (nof_cells == 0) {
++      return make_error("not_ready", "no active cell telemetry available");
++    }
++    logger.info("FAPO control server: requested reset of baseline policies for {} cell(s)", nof_cells);
++    auto buf = make_ok_prefix();
++    fmt::format_to(fmt::appender(buf), "\"mode\":\"baseline\"}}");
++    return fmt::to_string(buf);
++  }
++  if (op == "apply") {
++    // Read the latest merged snapshot to resolve slice names to slice ids and to clamp the requests.
++    fapo_cell_snapshot merged;
++    unsigned           nof_active_cells = 0;
++    if (not read_merged_snapshot(merged, nof_active_cells)) {
++      return make_error("not_ready", "no cell telemetry available yet");
++    }
++
++    // Local mapping of slice name -> (cell index, slice id) of the merged snapshot.
++    struct named_slice {
++      std::string    name;
++      du_cell_index_t cell;
++      ran_slice_id_t  id;
++      unsigned        max_prbs;
++    };
++    static_vector<named_slice, FAPO_MAX_SLICES * MAX_NOF_DU_CELLS> slice_index;
++    {
++      bool single_cell = nof_active_cells <= 1;
++      // Recompute the names exactly like build_telemetry_json does.
++      unsigned active_seen = 0;
++      for (unsigned cell_idx = 0; cell_idx != MAX_NOF_DU_CELLS; ++cell_idx) {
++        fapo_cell_snapshot snap;
++        if (not ctx.telemetry.read(to_du_cell_index(cell_idx), snap) or not snap.active) {
++          continue;
++        }
++        ++active_seen;
++        for (unsigned i = 0; i != snap.nof_slices; ++i) {
++          const fapo_slice_snapshot& s = snap.slices[i];
++          named_slice&               e = slice_index.emplace_back();
++          e.cell                       = to_du_cell_index(cell_idx);
++          e.id                         = s.id;
++          e.max_prbs                   = snap.prbs_total;
++          if (single_cell) {
++            e.name.assign(s.name.data());
++          } else {
++            e.name = fmt::format("c{}/{}", cell_idx, s.name.data());
++          }
++        }
++      }
++    }
++
++    fmt::memory_buffer applied;
++    fmt::memory_buffer rejected;
++    const jval*        vactions = req.find("actions");
++    if (vactions != nullptr and vactions->type == jval::type_t::arr) {
++      bool first_applied = true;
++      bool first_rejected = true;
++      for (const jval& act : vactions->arr) {
++        if (act.type != jval::type_t::obj) {
++          continue;
++        }
++        const jval* vsid  = act.find("slice_id");
++        const jval* vprbs = act.find("prbs");
++        const jval* vpw   = act.find("tx_power_dbm");
++
++        if (vsid == nullptr or vsid->type != jval::type_t::str) {
++          fmt::format_to(fmt::appender(rejected), "{}{{\"slice_id\":null,\"reason\":\"malformed_action\"}}",
++                         first_rejected ? "" : ",");
++          first_rejected = false;
++          continue;
++        }
++        const std::string& sid = vsid->str;
++
++        const named_slice* found = nullptr;
++        for (const auto& e : slice_index) {
++          if (e.name == sid) {
++            found = &e;
++            break;
++          }
++        }
++        if (found == nullptr) {
++          fmt::memory_buffer rbuf;
++          fmt::format_to(fmt::appender(rbuf), "{}{{\"slice_id\":", first_rejected ? "" : ",");
++          json_escape(rbuf, sid);
++          fmt::format_to(fmt::appender(rbuf), ",\"reason\":\"unknown_slice\"}}");
++          rejected.append(rbuf.data(), rbuf.data() + rbuf.size());
++          first_rejected = false;
++          continue;
++        }
++        if (vprbs == nullptr or vprbs->type != jval::type_t::number or vprbs->num < 1 or vprbs->num > 1e9) {
++          fmt::memory_buffer rbuf;
++          fmt::format_to(fmt::appender(rbuf), "{}{{\"slice_id\":", first_rejected ? "" : ",");
++          json_escape(rbuf, sid);
++          fmt::format_to(fmt::appender(rbuf), ",\"reason\":\"malformed_action\"}}");
++          rejected.append(rbuf.data(), rbuf.data() + rbuf.size());
++          first_rejected = false;
++          continue;
++        }
++
++        // Clamp the requested maximum number of RBs to the cell capacity.
++        unsigned prbs = static_cast<unsigned>(vprbs->num);
++        prbs          = std::min(std::max(prbs, 1U), found->max_prbs);
++
++        fapo_command cmd;
++        cmd.cell_index = found->cell;
++        cmd.slice_id   = found->id;
++        cmd.max_rbs    = prbs;
++        if (not ctx.commands.try_push(cmd)) {
++          logger.warning("FAPO control server: command queue full, dropping apply command");
++        }
++
++        double power = 0;
++        if (vpw != nullptr and vpw->type == jval::type_t::number) {
++          power = std::min(std::max(vpw->num, 0.0), 100.0);
++        }
++        fmt::memory_buffer abuf;
++        fmt::format_to(fmt::appender(abuf), "{}{{\"slice_id\":", first_applied ? "" : ",");
++        json_escape(abuf, sid);
++        fmt::format_to(fmt::appender(abuf), ",\"prbs\":{},\"tx_power_dbm\":{:.2f}}}", prbs, power);
++        applied.append(abuf.data(), abuf.data() + abuf.size());
++        first_applied = false;
++      }
++    }
++
++    auto buf = make_ok_prefix();
++    fmt::format_to(fmt::appender(buf), "\"applied\":[");
++    buf.append(applied.data(), applied.data() + applied.size());
++    fmt::format_to(fmt::appender(buf), "],\"rejected\":[");
++    buf.append(rejected.data(), rejected.data() + rejected.size());
++    fmt::format_to(fmt::appender(buf), "]}}");
++    return fmt::to_string(buf);
++  }
++
++  return make_error("unknown_op", fmt::format("unknown op \"{}\"", op));
++}
++
++std::string fapo_control_server::build_telemetry_json()
++{
++  fmt::memory_buffer buf;
++
++  double ts = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
++
++  fapo_cell_snapshot primary;
++  bool               has_primary      = false;
++  unsigned           nof_active_cells = 0;
++  for (unsigned cell_idx = 0; cell_idx != MAX_NOF_DU_CELLS; ++cell_idx) {
++    fapo_cell_snapshot snap;
++    if (ctx.telemetry.read(to_du_cell_index(cell_idx), snap) and snap.active) {
++      ++nof_active_cells;
++      if (not has_primary) {
++        primary     = snap;
++        has_primary = true;
++      }
++    }
++  }
++
++  fmt::format_to(fmt::appender(buf), "\"ts\":{:.3f},", ts);
++
++  if (not has_primary) {
++    // No cell has published telemetry yet.
++    fmt::format_to(fmt::appender(buf),
++                   "\"cell\":{{\"prbs_total\":0,\"available_prbs\":0,\"throughput_mbps\":0.0,\"latency_ms\":0.0,"
++                   "\"packet_loss\":0.0,\"tx_power_dbm\":{:.1f},\"spectral_efficiency\":0.0}},",
++                   static_cast<double>(cfg.nominal_tx_power_dbm));
++    fmt::format_to(fmt::appender(buf), "\"slices\":{{}},\"policies\":{{}}");
++    return fmt::to_string(buf);
++  }
++
++  // Derived cell metrics.
++  double   cell_used_rbs   = 0;
++  double   worst_latency   = 0;
++  double   max_queue_pct   = 0;
++  uint64_t acks            = primary.nof_dl_harq_acks;
++  uint64_t nacks           = primary.nof_dl_harq_nacks;
++
++  const double slots_per_sec = static_cast<double>(primary.slots_per_sec);
++  const double bytes_per_rb_slot = static_cast<double>(cfg.tb_bytes_per_rb_slot);
++
++  fmt::format_to(fmt::appender(buf), "\"slices\":{{");
++  bool first_slice = true;
++  for (unsigned i = 0; i != primary.nof_slices; ++i) {
++    const fapo_slice_snapshot& s = primary.slices[i];
++    const double avg_rbs        = static_cast<double>(s.avg_dl_rbs_per_slot) + static_cast<double>(s.avg_ul_rbs_per_slot);
++    const unsigned used_rbs     = static_cast<unsigned>(avg_rbs + 0.5);
++    const unsigned pend_bytes   = s.pending_dl_bytes + s.pending_ul_bytes;
++    const double   queue_pct    = 100.0 * std::min(1.0, static_cast<double>(pend_bytes) / static_cast<double>(cfg.queue_ref_bytes));
++    const double   drain_bps    = avg_rbs * bytes_per_rb_slot * slots_per_sec;
++    const double   latency_ms   = pend_bytes == 0 ? 0.0
++                                              : static_cast<double>(pend_bytes) / std::max(drain_bps, bytes_per_rb_slot) * 1000.0;
++
++    if (not first_slice) {
++      buf.push_back(',');
++    }
++    first_slice = false;
++    fmt::format_to(fmt::appender(buf), "\"{}\":{{\"queue_depth\":{:.2f},\"latency_ms\":{:.2f},\"prbs_used\":{},"
++                                      "\"packet_loss\":0.0}}",
++                   s.name.data(),
++                   queue_pct,
++                   latency_ms,
++                   used_rbs);
++
++    cell_used_rbs += avg_rbs;
++    worst_latency = std::max(worst_latency, latency_ms);
++    max_queue_pct = std::max(max_queue_pct, queue_pct);
++  }
++  fmt::format_to(fmt::appender(buf), "}},");
++
++  const double throughput_mbps = cell_used_rbs * bytes_per_rb_slot * slots_per_sec * 8.0 / 1e6;
++  const double packet_loss =
++      (acks + nacks) > 0 ? static_cast<double>(nacks) / static_cast<double>(acks + nacks) : 0.0;
++  const double se =
++      primary.scs_khz > 0
++          ? (throughput_mbps * 1e6) / (static_cast<double>(primary.prbs_total) * 12.0 *
++                                       static_cast<double>(primary.scs_khz) * 1000.0)
++          : 0.0;
++  const long available_prbs = std::max(0L, static_cast<long>(primary.prbs_total) - static_cast<long>(cell_used_rbs + 0.5));
++
++  fmt::format_to(fmt::appender(buf),
++                 "\"cell\":{{\"prbs_total\":{},\"available_prbs\":{},\"throughput_mbps\":{:.2f},\"latency_ms\":{:.2f},"
++                 "\"packet_loss\":{:.5f},\"tx_power_dbm\":{:.1f},\"spectral_efficiency\":{:.2f}}},",
++                 primary.prbs_total,
++                 available_prbs,
++                 throughput_mbps,
++                 worst_latency,
++                 packet_loss,
++                 static_cast<double>(cfg.nominal_tx_power_dbm),
++                 se);
++
++  // Effective slice policies (radio remains the source of truth).
++  fmt::format_to(fmt::appender(buf), "\"policies\":{{");
++  first_slice = true;
++  for (unsigned i = 0; i != primary.nof_slices; ++i) {
++    const fapo_slice_snapshot& s = primary.slices[i];
++    if (not first_slice) {
++      buf.push_back(',');
++    }
++    first_slice = false;
++    fmt::format_to(fmt::appender(buf),
++                   "\"{}\":{{\"slice_type\":\"{}\",\"min_prbs\":{},\"max_prbs\":{},\"max_latency_ms\":{},"
++                   "\"max_power_dbm\":{:.1f},\"priority\":{}}}",
++                   s.name.data(),
++                   fapo_slice_type_of_sst(s.sst),
++                   s.min_prbs,
++                   s.max_prbs,
++                   cfg.max_latency_ms,
++                   static_cast<double>(cfg.nominal_tx_power_dbm),
++                   s.priority);
++  }
++  fmt::format_to(fmt::appender(buf), "}}");
++
++  return fmt::to_string(buf);
++}
++
++bool fapo_control_server::read_merged_snapshot(fapo_cell_snapshot& merged, unsigned& nof_active_cells)
++{
++  nof_active_cells = 0;
++  for (unsigned cell_idx = 0; cell_idx != MAX_NOF_DU_CELLS; ++cell_idx) {
++    fapo_cell_snapshot snap;
++    if (ctx.telemetry.read(to_du_cell_index(cell_idx), snap) and snap.active) {
++      if (nof_active_cells == 0) {
++        merged = snap;
++      }
++      ++nof_active_cells;
++    }
++  }
++  return nof_active_cells > 0;
++}
++
++} // namespace srsran
+diff --git a/lib/scheduler/fapo/fapo_control_server.h b/lib/scheduler/fapo/fapo_control_server.h
+new file mode 100644
+index 0000000..743c255
+--- /dev/null
++++ b/lib/scheduler/fapo/fapo_control_server.h
+@@ -0,0 +1,90 @@
++/*
++ *
++ * Copyright 2021-2025 Software Radio Systems Limited
++ *
++ * This file is part of srsRAN.
++ *
++ * srsRAN is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU Affero General Public License as
++ * published by the Free Software Foundation, either version 3 of
++ * the License, or (at your option) any later version.
++ *
++ * srsRAN is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU Affero General Public License for more details.
++ *
++ * A copy of the GNU Affero General Public License can be found in
++ * the LICENSE file in the top-level directory of this distribution
++ * and at http://www.gnu.org/licenses/.
++ *
++ */
++
++#pragma once
++
++#include "fapo_telemetry.h"
++#include "srsran/scheduler/config/scheduler_expert_config.h"
++#include "srsran/srslog/logger.h"
++#include <array>
++#include <atomic>
++#include <thread>
++
++namespace srsran {
++
++/// \brief FAPO control server.
++///
++/// Exposes the FAPO control protocol (JSON Lines over TCP or Unix socket, version 1) on a dedicated non
++/// real-time thread:
++///
++///   - \c hello:        protocol handshake.
++///   - \c get_telemetry: latest per-slice scheduler telemetry and effective slice policies.
++///   - \c apply:        request a new maximum number of RBs for one or more slices. The commands are enqueued
++///                      and applied by the scheduler slot thread at the next slot indication.
++///   - \c reset:        restore the baseline RB limits of the slices of all active cells.
++///   - \c ping:         liveness check.
++///
++/// The radio remains the source of truth: the applied policies are reported back in the \c policies block of
++/// the telemetry, and clients must use them as the effective scheduling bounds.
++class fapo_control_server
++{
++public:
++  fapo_control_server(const fapo_control_expert_config& cfg_, fapo_context& ctx_);
++  ~fapo_control_server();
++
++private:
++  /// Per-client connection state.
++  struct client_state {
++    int         fd     = -1;
++    std::string inbuf;  ///< Partially received request line.
++    std::string outbuf; ///< Pending response bytes not yet sent.
++  };
++
++  /// Thread body: socket listen/accept/read/write loop.
++  void run();
++
++  /// \brief Processes one request line and returns the response to send (without the newline).
++  /// \param line Request line (JSON object).
++  /// \param[out] close_client Set to true if the connection must be closed after the response.
++  std::string handle_line(const std::string& line, bool& close_client);
++
++  /// Builds the telemetry payload for the reply of a \c get_telemetry operation.
++  std::string build_telemetry_json();
++
++  /// Reads the latest snapshot across all cells, merging slices of multiple cells if needed.
++  /// \return true if at least one active cell snapshot was available.
++  bool read_merged_snapshot(fapo_cell_snapshot& merged, unsigned& nof_active_cells);
++
++  const fapo_control_expert_config cfg;
++  fapo_context&                    ctx;
++  srslog::basic_logger&            logger;
++
++  std::atomic<bool> stop_flag{false};
++  std::thread       ctrl_thread;
++
++  /// Listening socket descriptor (tcp or unix), or -1 when not listening.
++  int listen_fd = -1;
++  /// Path of the unix socket, to unlink on shutdown (empty for tcp).
++  std::string unix_sock_path;
++};
++
++} // namespace srsran
+diff --git a/lib/scheduler/fapo/fapo_telemetry.h b/lib/scheduler/fapo/fapo_telemetry.h
+new file mode 100644
+index 0000000..d3ca6ec
+--- /dev/null
++++ b/lib/scheduler/fapo/fapo_telemetry.h
+@@ -0,0 +1,199 @@
++/*
++ *
++ * Copyright 2021-2025 Software Radio Systems Limited
++ *
++ * This file is part of srsRAN.
++ *
++ * srsRAN is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU Affero General Public License as
++ * published by the Free Software Foundation, either version 3 of
++ * the License, or (at your option) any later version.
++ *
++ * srsRAN is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU Affero General Public License for more details.
++ *
++ * A copy of the GNU Affero General Public License can be found in
++ * the LICENSE file in the top-level directory of this distribution
++ * and at http://www.gnu.org/licenses/.
++ *
++ */
++
++#pragma once
++
++#include "../slicing/ran_slice_id.h"
++#include "srsran/adt/mpmc_queue.h"
++#include "srsran/adt/span.h"
++#include "srsran/ran/du_types.h"
++#include "srsran/ran/pci.h"
++#include "srsran/ran/rrm.h"
++#include "srsran/ran/s_nssai.h"
++#include <array>
++#include <atomic>
++#include <cstdio>
++#include <cstring>
++
++namespace srsran {
++
++/// Maximum number of slices reported in a FAPO telemetry snapshot.
++/// \remark 16 configured RRM policy members (see \c MAX_SLICE_RECONF_POLICIES) + default SRB slice + default DRB slice.
++constexpr unsigned FAPO_MAX_SLICES = MAX_SLICE_RECONF_POLICIES + 2;
++
++/// Maximum number of pending FAPO control commands drained per slot.
++constexpr unsigned FAPO_MAX_CMDS_PER_SLOT = 32;
++
++/// \brief Snapshot of the FAPO-relevant state of one RAN slice.
++///
++/// All the fields are filled from the real scheduler state (see \c inter_slice_scheduler::fapo_collect_cell_snapshot).
++struct fapo_slice_snapshot {
++  /// RAN slice identifier (as used by the scheduler internally).
++  ran_slice_id_t id{};
++  /// Human-readable slice identifier exposed over the control protocol (e.g. "srb", "default", "sst2-sd0xa").
++  std::array<char, 24> name{};
++  /// Slice scheduling priority (0..255).
++  unsigned priority = 0;
++  /// Current RB limits of the slice (they change when FAPO applies new policies).
++  unsigned min_prbs       = 0;
++  unsigned max_prbs       = 0;
++  unsigned dedicated_prbs = 0;
++  /// Number of UEs with at least one bearer in this slice.
++  unsigned nof_ues = 0;
++  /// Sum of DL/UL pending bytes of all UEs of this slice (RLC/BSR reported queues).
++  unsigned pending_dl_bytes = 0;
++  unsigned pending_ul_bytes = 0;
++  /// EWMA of the number of PDSCH/PUSCH RBs granted per slot for this slice.
++  float avg_dl_rbs_per_slot = 0.0F;
++  float avg_ul_rbs_per_slot = 0.0F;
++  /// S-NSSAI SST of the slice RRM policy member (0 for the reserved default slices).
++  uint8_t sst = 0;
++};
++
++/// \brief Snapshot of the FAPO-relevant state of one cell, published by the slot thread.
++struct fapo_cell_snapshot {
++  bool     active     = false;
++  pci_t    pci        = 0;
++  unsigned prbs_total = 0;
++  /// Number of slots per second and SCS of the cell, used to derive service rates.
++  unsigned slots_per_sec = 0;
++  unsigned scs_khz       = 0;
++  /// Cumulative DL HARQ outcome counters of the cell (real packet loss proxy).
++  uint64_t nof_dl_harq_acks  = 0;
++  uint64_t nof_dl_harq_nacks = 0;
++  unsigned nof_slices        = 0;
++  std::array<fapo_slice_snapshot, FAPO_MAX_SLICES> slices{};
++};
++
++/// \brief Lock-free telemetry store exchanged between the scheduler slot thread (writer) and the FAPO control
++/// server thread (reader).
++///
++/// A seqlock is used because the writer runs in the real-time slot thread and must never block. Snapshots are
++/// small PODs, so a seqlock with bounded reader retries is adequate.
++class fapo_telemetry_store
++{
++  struct cell_entry {
++    std::atomic<uint32_t> seq{0};
++    fapo_cell_snapshot    snap{};
++  };
++
++public:
++  /// \brief Publish a new snapshot for the given cell. Called from the scheduler slot thread.
++  void publish(du_cell_index_t cell_index, const fapo_cell_snapshot& snap)
++  {
++    cell_entry& e = cells[static_cast<unsigned>(cell_index) % cells.size()];
++    uint32_t    s = e.seq.load(std::memory_order_relaxed);
++    e.seq.store(s + 1, std::memory_order_relaxed); // make it odd -> write in progress
++    std::atomic_thread_fence(std::memory_order_release);
++    e.snap = snap;
++    std::atomic_thread_fence(std::memory_order_release);
++    e.seq.store(s + 2, std::memory_order_relaxed); // make it even -> write complete
++  }
++
++  /// \brief Read the latest snapshot of the given cell. Called from the FAPO control server thread.
++  /// \return true if a complete snapshot was read, false if no snapshot was ever published for this cell.
++  bool read(du_cell_index_t cell_index, fapo_cell_snapshot& out) const
++  {
++    const cell_entry& e = cells[static_cast<unsigned>(cell_index) % cells.size()];
++    for (unsigned attempt = 0; attempt != 8; ++attempt) {
++      uint32_t s1 = e.seq.load(std::memory_order_acquire);
++      if ((s1 & 1U) != 0U or s1 == 0U) {
++        // Write in progress or no snapshot published yet.
++        if (s1 == 0U) {
++          return false;
++        }
++        continue;
++      }
++      out = e.snap;
++      std::atomic_thread_fence(std::memory_order_acquire);
++      uint32_t s2 = e.seq.load(std::memory_order_relaxed);
++      if (s1 == s2) {
++        return true;
++      }
++    }
++    return false;
++  }
++
++private:
++  std::array<cell_entry, MAX_NOF_DU_CELLS> cells;
++};
++
++/// Control command produced by the FAPO control server thread and applied by the scheduler slot thread.
++struct fapo_command {
++  du_cell_index_t cell_index = INVALID_DU_CELL_INDEX;
++  /// Restore the baseline RB limits of all slices of the cell.
++  bool reset = false;
++  /// RAN slice to modify (ignored when \c reset is true).
++  ran_slice_id_t slice_id{};
++  /// New maximum number of RBs granted to the slice.
++  unsigned max_rbs = 0;
++};
++
++/// Shared state between the FAPO control server thread and the scheduler slot threads.
++struct fapo_context {
++  /// Queue capacity for pending control commands.
++  static constexpr unsigned QUEUE_CAPACITY = 1024;
++
++  /// Latest telemetry snapshots (written by slot thread, read by control server).
++  fapo_telemetry_store telemetry;
++  /// Queue of pending control commands (pushed by control server, drained by slot thread).
++  explicit fapo_context(unsigned queue_capacity = QUEUE_CAPACITY) : commands(queue_capacity) {}
++  concurrent_queue<fapo_command, concurrent_queue_policy::lockfree_mpmc> commands;
++};
++
++/// \brief Computes the FAPO wire name of a slice.
++///
++/// Reserved slices use fixed names; configured slices are named after their S-NSSAI. In the (unlikely) case of two
++/// configured slices resolving to the same name, the internal slice id is appended to disambiguate.
++inline void fapo_fill_slice_name(ran_slice_id_t id, const rrm_policy_member& member, span<char> out)
++{
++  int ret = 0;
++  if (id == SRB_RAN_SLICE_ID) {
++    ret = std::snprintf(out.data(), out.size(), "srb");
++  } else if (id == DEFAULT_DRB_RAN_SLICE_ID) {
++    ret = std::snprintf(out.data(), out.size(), "default");
++  } else if (member.s_nssai.sd.is_set()) {
++    ret = std::snprintf(
++        out.data(), out.size(), "sst%u-sd%#x", member.s_nssai.sst.value(), member.s_nssai.sd.value());
++  } else {
++    ret = std::snprintf(out.data(), out.size(), "sst%u", member.s_nssai.sst.value());
++  }
++  if (ret < 0 or static_cast<unsigned>(ret) >= out.size()) {
++    // Name does not fit. Fall back to the internal slice id.
++    std::snprintf(out.data(), out.size(), "slice%u", id.value());
++  }
++}
++
++/// \brief Maps the slice SST to the FAPO slice type reported over the control protocol.
++/// \remark The mapping follows the standardized SST values of TS 23.501: 1 = eMBB, 2 = URLLC.
++inline const char* fapo_slice_type_of_sst(uint8_t sst)
++{
++  if (sst == 2U) {
++    return "rll";
++  }
++  if (sst == 1U) {
++    return "high_capacity";
++  }
++  return "best_effort";
++}
++
++} // namespace srsran
+diff --git a/lib/scheduler/scheduler_impl.cpp b/lib/scheduler/scheduler_impl.cpp
+index 3c2c2d7..61f21f3 100644
+--- a/lib/scheduler/scheduler_impl.cpp
++++ b/lib/scheduler/scheduler_impl.cpp
+@@ -30,6 +30,13 @@ using namespace srsran;
+ scheduler_impl::scheduler_impl(const scheduler_config& sched_cfg_) :
+   expert_params(sched_cfg_.expert_params), logger(srslog::fetch_basic_logger("SCHED")), cfg_mng(sched_cfg_, metrics)
+ {
++  if (expert_params.fapo.enabled) {
++    logger.info("FAPO control interface enabled (endpoint: {}, telemetry period: {} ms)",
++                expert_params.fapo.endpoint,
++                expert_params.fapo.telemetry_period.count());
++    fapo_ctx = std::make_unique<fapo_context>(1024);
++    fapo_srv = std::make_unique<fapo_control_server>(expert_params.fapo, *fapo_ctx);
++  }
+ }
+ 
+ bool scheduler_impl::handle_cell_configuration_request(const sched_cell_configuration_request_message& msg)
+@@ -42,7 +49,10 @@ bool scheduler_impl::handle_cell_configuration_request(const sched_cell_configur
+   // Check if it is a new DU Cell Group.
+   if (not groups.contains(msg.cell_group_index)) {
+     // If it is a new group, create a new instance.
+-    groups.emplace(msg.cell_group_index, std::make_unique<ue_scheduler_impl>(expert_params.ue));
++    groups.emplace(msg.cell_group_index,
++                   std::make_unique<ue_scheduler_impl>(expert_params.ue,
++                                                       fapo_ctx.get(),
++                                                       expert_params.fapo.telemetry_period));
+   }
+ 
+   // Create a new cell scheduler instance.
+@@ -50,6 +60,11 @@ bool scheduler_impl::handle_cell_configuration_request(const sched_cell_configur
+                 std::make_unique<cell_scheduler>(
+                     expert_params, msg, *cell_cfg, *groups[msg.cell_group_index], metrics.at(msg.cell_index)));
+ 
++  if (fapo_ctx != nullptr) {
++    // Register this cell with the FAPO control interface.
++    fapo_ctx->telemetry.publish(msg.cell_index, fapo_cell_snapshot{});
++  }
++
+   return true;
+ }
+ 
+@@ -57,6 +72,11 @@ void scheduler_impl::handle_cell_removal_request(du_cell_index_t cell_index)
+ {
+   srsran_assert(cells.contains(cell_index), "cell={} does not exist", fmt::underlying(cell_index));
+ 
++  if (fapo_ctx != nullptr) {
++    // De-register this cell from the FAPO control interface.
++    fapo_ctx->telemetry.publish(cell_index, fapo_cell_snapshot{});
++  }
++
+   // Remove cell.
+   cells.erase(cell_index);
+ 
+diff --git a/lib/scheduler/scheduler_impl.h b/lib/scheduler/scheduler_impl.h
+index ac6f55d..24e36ab 100644
+--- a/lib/scheduler/scheduler_impl.h
++++ b/lib/scheduler/scheduler_impl.h
+@@ -24,6 +24,7 @@
+ 
+ #include "cell_scheduler.h"
+ #include "config/sched_config_manager.h"
++#include "fapo/fapo_control_server.h"
+ #include "logging/scheduler_metrics_handler.h"
+ #include "ue_scheduling/ue_scheduler.h"
+ #include "srsran/scheduler/config/scheduler_expert_config.h"
+@@ -95,6 +96,14 @@ private:
+ 
+   /// Container of DU Cell-specific resources.
+   slotted_id_table<du_cell_index_t, std::unique_ptr<cell_scheduler>, MAX_NOF_DU_CELLS> cells;
++
++  /// \brief FAPO control context and server.
++  ///
++  /// The context (telemetry store + command queue) is shared between the control server thread and the slot
++  /// threads of all cell groups. Note the declaration order: the server is destroyed (and its thread joined)
++  /// before the context it references.
++  std::unique_ptr<fapo_context>       fapo_ctx;
++  std::unique_ptr<fapo_control_server> fapo_srv;
+ };
+ 
+ } // namespace srsran
+diff --git a/lib/scheduler/slicing/inter_slice_scheduler.cpp b/lib/scheduler/slicing/inter_slice_scheduler.cpp
+index 9c9644f..73f0900 100644
+--- a/lib/scheduler/slicing/inter_slice_scheduler.cpp
++++ b/lib/scheduler/slicing/inter_slice_scheduler.cpp
+@@ -367,6 +367,90 @@ void inter_slice_scheduler::handle_slice_reconfiguration_request(const du_cell_s
+   }
+ }
+ 
++void inter_slice_scheduler::fapo_collect_cell_snapshot(fapo_cell_snapshot& snapshot) const
++{
++  snapshot.active     = true;
++  snapshot.pci        = cell_cfg.pci;
++  snapshot.prbs_total = cell_cfg.dl_cfg_common.init_dl_bwp.generic_params.crbs.length();
++  snapshot.slots_per_sec =
++      1000U * (1U << to_numerology_value(cell_cfg.scs_common));
++  snapshot.scs_khz    = scs_to_khz(cell_cfg.scs_common);
++  snapshot.nof_slices = 0;
++
++  for (const auto& slice : slices) {
++    if (snapshot.nof_slices >= snapshot.slices.size()) {
++      logger.warning("cell={}: Discarding FAPO telemetry of slices beyond the first {} slices.",
++                     fmt::underlying(cell_cfg.cell_index),
++                     snapshot.slices.size());
++      break;
++    }
++
++    fapo_slice_snapshot& s = snapshot.slices[snapshot.nof_slices];
++    s.id                   = slice.inst.id;
++    fapo_fill_slice_name(slice.inst.id, slice.inst.cfg.rrc_member, span<char>{s.name.data(), s.name.size()});
++    s.priority         = slice.inst.cfg.priority;
++    s.min_prbs         = slice.inst.cfg.rbs.min();
++    s.max_prbs         = slice.inst.cfg.rbs.max();
++    s.dedicated_prbs   = slice.inst.cfg.rbs.dedicated();
++    s.avg_dl_rbs_per_slot = slice.inst.average_pdsch_rbs_per_slot();
++    s.avg_ul_rbs_per_slot = slice.inst.average_pusch_rbs_per_slot();
++
++    unsigned pending_dl = 0;
++    unsigned pending_ul = 0;
++    unsigned nof_ues    = 0;
++    for (const auto& slice_ue_it : slice.inst.get_ues()) {
++      pending_dl += slice_ue_it.pending_dl_newtx_bytes();
++      pending_ul += slice_ue_it.pending_ul_newtx_bytes();
++      ++nof_ues;
++    }
++    s.pending_dl_bytes = pending_dl;
++    s.pending_ul_bytes = pending_ul;
++    s.nof_ues          = nof_ues;
++    s.sst              = slice.inst.cfg.rrc_member.s_nssai.sst.value();
++
++    ++snapshot.nof_slices;
++  }
++}
++
++bool inter_slice_scheduler::fapo_apply_slice_max_rbs(ran_slice_id_t slice_id, unsigned max_rbs)
++{
++  if (slice_id.value() >= slices.size()) {
++    return false;
++  }
++  ran_slice_instance& slice = slices[slice_id.value()].inst;
++
++  const unsigned cell_max_rbs = cell_cfg.dl_cfg_common.init_dl_bwp.generic_params.crbs.length();
++  const unsigned new_max      = std::min(std::max(max_rbs, 1U), cell_max_rbs);
++  const unsigned new_min      = std::min(slice.cfg.rbs.min(), new_max);
++  const unsigned new_ded      = std::min(slice.cfg.rbs.dedicated(), new_min);
++
++  logger.info("cell={} slice={}: FAPO changing slice max RBs: {} -> {} (min: {}, dedicated: {})",
++              fmt::underlying(cell_cfg.cell_index),
++              slice.id.value(),
++              slice.cfg.rbs.max(),
++              new_max,
++              new_min,
++              new_ded);
++
++  slice.cfg.rbs = {new_ded, new_min, new_max};
++  return true;
++}
++
++void inter_slice_scheduler::fapo_reset_slice_policies_to_baseline()
++{
++  for (auto& slice : slices) {
++    if (slice.inst.cfg.rbs.max() != slice.inst.cfg_baseline.rbs.max() or
++        slice.inst.cfg.rbs.min() != slice.inst.cfg_baseline.rbs.min()) {
++      logger.info("cell={} slice={}: FAPO restoring baseline slice RB limits (max: {} -> {})",
++                  fmt::underlying(cell_cfg.cell_index),
++                  slice.inst.id.value(),
++                  slice.inst.cfg.rbs.max(),
++                  slice.inst.cfg_baseline.rbs.max());
++      slice.inst.cfg.rbs = slice.inst.cfg_baseline.rbs;
++    }
++  }
++}
++
+ inter_slice_scheduler::priority_type inter_slice_scheduler::ran_slice_sched_context::get_prio(bool       is_dl,
+                                                                                               slot_point pdcch_slot,
+                                                                                               slot_point pxsch_slot,
+diff --git a/lib/scheduler/slicing/inter_slice_scheduler.h b/lib/scheduler/slicing/inter_slice_scheduler.h
+index 6233f00..7380a64 100644
+--- a/lib/scheduler/slicing/inter_slice_scheduler.h
++++ b/lib/scheduler/slicing/inter_slice_scheduler.h
+@@ -23,6 +23,7 @@
+ #pragma once
+ 
+ #include "../policy/scheduler_policy.h"
++#include "../fapo/fapo_telemetry.h"
+ #include "ran_slice_candidate.h"
+ #include "ran_slice_instance.h"
+ 
+@@ -59,6 +60,22 @@ public:
+ 
+   void handle_slice_reconfiguration_request(const du_cell_slice_reconfig_request& slice_reconf_req);
+ 
++  /// \brief Fills a FAPO telemetry snapshot with the current state of all the slices of this cell.
++  ///
++  /// \remark This function must be called from the thread that runs the scheduler slot loop.
++  void fapo_collect_cell_snapshot(fapo_cell_snapshot& snapshot) const;
++
++  /// \brief Updates the maximum number of RBs that a given slice can be granted.
++  ///
++  /// The RB limits of the slice are updated preserving the dedicated <= min <= max invariant. If the new max is
++  /// lower than the current dedicated/min limits, those limits are lowered accordingly.
++  ///
++  /// \return true if the slice was found, false otherwise.
++  bool fapo_apply_slice_max_rbs(ran_slice_id_t slice_id, unsigned max_rbs);
++
++  /// \brief Restores the baseline RB limits of all the slices of this cell (policies they were instantiated with).
++  void fapo_reset_slice_policies_to_baseline();
++
+ private:
+   /// Class responsible for tracking the scheduling context of each RAN slice instance.
+   struct ran_slice_sched_context {
+diff --git a/lib/scheduler/slicing/ran_slice_instance.cpp b/lib/scheduler/slicing/ran_slice_instance.cpp
+index 45f8a81..cccd672 100644
+--- a/lib/scheduler/slicing/ran_slice_instance.cpp
++++ b/lib/scheduler/slicing/ran_slice_instance.cpp
+@@ -39,6 +39,7 @@ ran_slice_instance::ran_slice_instance(ran_slice_id_t                 id_,
+   id(id_),
+   cell_cfg(&cell_cfg_),
+   cfg(cfg_),
++  cfg_baseline(cfg_),
+   min_k2(get_min_k2(cell_cfg->ul_cfg_common.init_ul_bwp.pusch_cfg_common->pusch_td_alloc_list)),
+   pusch_rb_count_per_slot(get_allocator_ring_size_gt_min(SCHEDULER_MAX_K2 + cell_cfg->ntn_cs_koffset)),
+   slice_ues(id, cell_cfg->cell_index)
+diff --git a/lib/scheduler/slicing/ran_slice_instance.h b/lib/scheduler/slicing/ran_slice_instance.h
+index 1f9e73c..f24796b 100644
+--- a/lib/scheduler/slicing/ran_slice_instance.h
++++ b/lib/scheduler/slicing/ran_slice_instance.h
+@@ -91,7 +91,10 @@ public:
+   ran_slice_id_t            id;
+   const cell_configuration* cell_cfg;
+   slice_rrm_policy_config   cfg;
+-  const unsigned            min_k2;
++  /// Copy of the RRM policy configuration this slice was instantiated with. It is used by the FAPO control interface
++  /// to restore the baseline policy when a controller requests a reset.
++  slice_rrm_policy_config cfg_baseline;
++  const unsigned          min_k2;
+ 
+   /// Counter of how many RBs have been scheduled for PDSCH in the current slot for this slice.
+   unsigned pdsch_rb_count = 0;
+diff --git a/lib/scheduler/ue_scheduling/ue_event_manager.cpp b/lib/scheduler/ue_scheduling/ue_event_manager.cpp
+index f9756c9..bbb0ed8 100644
+--- a/lib/scheduler/ue_scheduling/ue_event_manager.cpp
++++ b/lib/scheduler/ue_scheduling/ue_event_manager.cpp
+@@ -986,6 +986,11 @@ void ue_cell_event_manager::handle_harq_ind(ue_cell&
+       if (result->update == dl_harq_process_handle::status_update::acked or
+           result->update == dl_harq_process_handle::status_update::nacked) {
+         metrics.handle_dl_harq_ack(ue_cc.ue_index, result->update == dl_harq_process_handle::status_update::acked, tbs);
++        if (result->update == dl_harq_process_handle::status_update::acked) {
++          ++nof_dl_harq_acks;
++        } else {
++          ++nof_dl_harq_nacks;
++        }
+       }
+     }
+   }
+diff --git a/lib/scheduler/ue_scheduling/ue_event_manager.h b/lib/scheduler/ue_scheduling/ue_event_manager.h
+index 7c82944..daa6956 100644
+--- a/lib/scheduler/ue_scheduling/ue_event_manager.h
++++ b/lib/scheduler/ue_scheduling/ue_event_manager.h
+@@ -103,7 +103,15 @@ public:
+   // Handle slice reconfiguration request.
+   void handle_slice_reconfiguration_request(const du_cell_slice_reconfig_request& req);
+ 
++  /// \brief Cumulative counters of DL HARQ outcomes, used by the FAPO control interface to derive a
++  /// cell packet loss estimate.
++  uint64_t fapo_nof_dl_harq_acks() const { return nof_dl_harq_acks; }
++  uint64_t fapo_nof_dl_harq_nacks() const { return nof_dl_harq_nacks; }
++
+ private:
++  /// FAPO: cumulative DL HARQ ACK/NACK counters of this cell.
++  uint64_t nof_dl_harq_acks  = 0;
++  uint64_t nof_dl_harq_nacks = 0;
+   class ue_dl_buffer_occupancy_manager;
+ 
+   /// Result of processing a cell event.
+diff --git a/lib/scheduler/ue_scheduling/ue_scheduler_impl.cpp b/lib/scheduler/ue_scheduling/ue_scheduler_impl.cpp
+index fb16a9c..d41ff89 100644
+--- a/lib/scheduler/ue_scheduling/ue_scheduler_impl.cpp
++++ b/lib/scheduler/ue_scheduling/ue_scheduler_impl.cpp
+@@ -22,14 +22,80 @@
+ 
+ #include "ue_scheduler_impl.h"
+ #include "../logging/scheduler_metrics_handler.h"
++#include "srsran/ran/subcarrier_spacing.h"
+ 
+ using namespace srsran;
+ 
+-ue_scheduler_impl::ue_scheduler_impl(const scheduler_ue_expert_config& expert_cfg_) :
+-  expert_cfg(expert_cfg_), logger(srslog::fetch_basic_logger("SCHED")), event_mng(ue_db)
++ue_scheduler_impl::ue_scheduler_impl(const scheduler_ue_expert_config& expert_cfg_,
++                                     fapo_context*                    fapo_ctx_,
++                                     std::chrono::milliseconds        fapo_period) :
++  expert_cfg(expert_cfg_),
++  logger(srslog::fetch_basic_logger("SCHED")),
++  event_mng(ue_db),
++  fapo_ctx(fapo_ctx_),
++  fapo_telemetry_period(fapo_period)
+ {
+ }
+ 
++void ue_scheduler_impl::fapo_publish_snapshot(cell_context& cell, du_cell_index_t cell_index, slot_point sl_tx)
++{
++  if (fapo_ctx == nullptr) {
++    return;
++  }
++
++  const unsigned slots_per_sec = 1000U * (1U << to_numerology_value(cell.cell_res_alloc->cfg.scs_common));
++  const unsigned period_slots =
++      std::max(1U, static_cast<unsigned>(fapo_telemetry_period.count() * static_cast<long long>(slots_per_sec) / 1000));
++
++  const slot_point& last_pub = fapo_last_pub_slot[static_cast<unsigned>(cell_index)];
++  if (last_pub.valid() and static_cast<unsigned>(sl_tx - last_pub) < period_slots) {
++    return;
++  }
++  fapo_last_pub_slot[static_cast<unsigned>(cell_index)] = sl_tx;
++
++  fapo_cell_snapshot snap;
++  cell.slice_sched.fapo_collect_cell_snapshot(snap);
++  snap.nof_dl_harq_acks  = cell.ev_mng->fapo_nof_dl_harq_acks();
++  snap.nof_dl_harq_nacks = cell.ev_mng->fapo_nof_dl_harq_nacks();
++  fapo_ctx->telemetry.publish(cell_index, snap);
++}
++
++void ue_scheduler_impl::fapo_drain_commands(slot_point sl_tx [[maybe_unused]])
++{
++  if (fapo_ctx == nullptr) {
++    return;
++  }
++
++  fapo_command cmd;
++  for (unsigned drained = 0; drained != FAPO_MAX_CMDS_PER_SLOT; ++drained) {
++    if (not fapo_ctx->commands.try_pop(cmd)) {
++      return;
++    }
++
++    if (cells.contains(cmd.cell_index)) {
++      // Command belongs to a cell of this cell group. Apply it directly, as this code runs in the slot thread
++      // that owns the slice scheduler state.
++      auto& cell = cells[cmd.cell_index];
++      if (cmd.reset) {
++        cell.slice_sched.fapo_reset_slice_policies_to_baseline();
++        logger.info("cell={}: FAPO restored baseline slice policies.",
++                    fmt::underlying(cmd.cell_index));
++      } else if (not cell.slice_sched.fapo_apply_slice_max_rbs(cmd.slice_id, cmd.max_rbs)) {
++        logger.warning("cell={}: FAPO apply for unknown slice id={}.",
++                       fmt::underlying(cmd.cell_index),
++                       cmd.slice_id.value());
++      }
++      continue;
++    }
++
++    // The command targets a cell of another cell group. Push it back for the other group to process.
++    if (not fapo_ctx->commands.try_push(cmd)) {
++      logger.warning("FAPO command queue is full. Dropping command for cell={}.",
++                     fmt::underlying(cmd.cell_index));
++    }
++  }
++}
++
+ ue_cell_scheduler* ue_scheduler_impl::do_add_cell(const ue_cell_scheduler_creation_request& params)
+ {
+   cells.emplace(params.cell_index, *this, params);
+@@ -186,6 +252,9 @@ void ue_scheduler_impl::run_slot_impl(slot_point slot_tx)
+   }
+   last_sl_ind = slot_tx;
+ 
++  // Apply any pending FAPO control commands (if the FAPO control interface is enabled).
++  fapo_drain_commands(slot_tx);
++
+   for (auto& group_cell : cells) {
+     du_cell_index_t cell_index = group_cell.cell_res_alloc->cfg.cell_index;
+ 
+@@ -210,6 +279,9 @@ void ue_scheduler_impl::run_slot_impl(slot_point slot_tx)
+     // Update slice context and compute slice priorities.
+     group_cell.slice_sched.slot_indication(slot_tx, *group_cell.cell_res_alloc);
+ 
++    // Publish FAPO telemetry snapshot (if the FAPO control interface is enabled and the period elapsed).
++    fapo_publish_snapshot(group_cell, cell_index, slot_tx);
++
+     // Update intra-slice scheduler context.
+     group_cell.intra_slice_sched.slot_indication(slot_tx);
+ 
+diff --git a/lib/scheduler/ue_scheduling/ue_scheduler_impl.h b/lib/scheduler/ue_scheduling/ue_scheduler_impl.h
+index f5f8600..787b0aa 100644
+--- a/lib/scheduler/ue_scheduling/ue_scheduler_impl.h
++++ b/lib/scheduler/ue_scheduling/ue_scheduler_impl.h
+@@ -32,8 +32,10 @@
+ #include "ue_cell_grid_allocator.h"
+ #include "ue_event_manager.h"
+ #include "ue_fallback_scheduler.h"
++#include "../fapo/fapo_telemetry.h"
+ #include "ue_scheduler.h"
+ #include "srsran/scheduler/config/scheduler_expert_config.h"
++#include <array>
+ #include <mutex>
+ 
+ namespace srsran {
+@@ -43,7 +45,9 @@ namespace srsran {
+ class ue_scheduler_impl final : public ue_scheduler
+ {
+ public:
+-  explicit ue_scheduler_impl(const scheduler_ue_expert_config& expert_cfg_);
++  ue_scheduler_impl(const scheduler_ue_expert_config& expert_cfg_,
++                    fapo_context*                    fapo_ctx_      = nullptr,
++                    std::chrono::milliseconds        fapo_period    = std::chrono::milliseconds{0});
+ 
+ private:
+   ue_cell_scheduler* do_add_cell(const ue_cell_scheduler_creation_request& params) override;
+@@ -114,6 +118,16 @@ private:
+     void stop() override { parent.do_stop_cell(cell_res_alloc->cfg.cell_index); }
+   };
+ 
++  /// Publishes a FAPO telemetry snapshot of the given cell into the shared telemetry store, if the telemetry
++  /// period elapsed. Called from the slot loop.
++  void fapo_publish_snapshot(cell_context& cell, du_cell_index_t cell_index, slot_point sl_tx);
++
++  /// Drains the pending FAPO control commands and applies them to the cells of this cell group.
++  ///
++  /// Commands of cells that do not belong to this cell group are pushed back into the shared queue for other
++  /// cell groups to process.
++  void fapo_drain_commands(slot_point sl_tx);
++
+   const scheduler_ue_expert_config& expert_cfg;
+   srslog::basic_logger&             logger;
+ 
+@@ -126,6 +140,16 @@ private:
+   /// Processor of UE input events.
+   ue_event_manager event_mng;
+ 
++  /// FAPO control context (telemetry store + command queue). It is null when the FAPO control interface
++  /// is disabled.
++  fapo_context* fapo_ctx = nullptr;
++
++  /// FAPO telemetry publication period.
++  std::chrono::milliseconds fapo_telemetry_period{0};
++
++  /// Last slot in which a telemetry snapshot was published for each cell.
++  std::array<slot_point, MAX_NOF_DU_CELLS> fapo_last_pub_slot{};
++
+   // Mutex to lock cells of the same cell group (when CA enabled) for joint carrier scheduling
+   std::mutex cell_group_mutex;
+ 
+-- 
+2.47.3
+

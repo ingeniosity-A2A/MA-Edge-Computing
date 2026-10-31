@@ -1,0 +1,507 @@
+From 8384f6e04a0e44ba230fdcd0994f0faff5c2246b Mon Sep 17 00:00:00 2001
+From: FAPO Integration <fapo-dev@example.local>
+Date: Sat, 12 Sep 2026 04:05:19 +0000
+Subject: [PATCH 4/4] tests: add FAPO control server unit tests and interop
+ fixture
+
+* fapo_control_server_test: gtest of the telemetry store (seqlock
+  consistency under concurrent publish/read) and of the FAPO v1
+  protocol end-to-end against a real server instance (hello, ping,
+  telemetry, apply validation and clamping, reset, error handling).
+
+* fapo_interop_server: test fixture binary that instantiates the real
+  control server and publishes deterministic snapshots, used to verify
+  the wire compatibility with external FAPO clients (e.g. the Python
+  SRSRANAdapter).
+---
+ tests/unittests/scheduler/CMakeLists.txt      |  12 +
+ .../fapo/fapo_control_server_test.cpp         | 308 ++++++++++++++++++
+ .../scheduler/fapo/fapo_interop_main.cpp      | 138 ++++++++
+ 3 files changed, 458 insertions(+)
+ create mode 100644 tests/unittests/scheduler/fapo/fapo_control_server_test.cpp
+ create mode 100644 tests/unittests/scheduler/fapo/fapo_interop_main.cpp
+
+diff --git a/tests/unittests/scheduler/CMakeLists.txt b/tests/unittests/scheduler/CMakeLists.txt
+index 5d8fda2..8e4d237 100644
+--- a/tests/unittests/scheduler/CMakeLists.txt
++++ b/tests/unittests/scheduler/CMakeLists.txt
+@@ -46,6 +46,18 @@ target_link_libraries(sched_no_ue_test
+         gtest_main)
+ add_test(sched_no_ue_test sched_no_ue_test)
+ 
++add_executable(fapo_control_server_test fapo/fapo_control_server_test.cpp)
++target_link_libraries(fapo_control_server_test
++        srsran_sched
++        srslog
++        gtest
++        gtest_main)
++add_test(fapo_control_server_test fapo_control_server_test)
++
++# Cross-language interop fixture for the FAPO control server (test harness, see fapo_interop_main.cpp).
++add_executable(fapo_interop_server fapo/fapo_interop_main.cpp)
++target_link_libraries(fapo_interop_server srsran_sched srslog pthread)
++
+ add_executable(pdcch_resource_allocator_test pdcch/pdcch_resource_allocator_test.cpp)
+ target_link_libraries(pdcch_resource_allocator_test
+ 	srsran_sched
+diff --git a/tests/unittests/scheduler/fapo/fapo_control_server_test.cpp b/tests/unittests/scheduler/fapo/fapo_control_server_test.cpp
+new file mode 100644
+index 0000000..56ffef7
+--- /dev/null
++++ b/tests/unittests/scheduler/fapo/fapo_control_server_test.cpp
+@@ -0,0 +1,308 @@
++/*
++ *
++ * Copyright 2021-2025 Software Radio Systems Limited
++ *
++ * This file is part of srsRAN.
++ *
++ * srsRAN is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU Affero General Public License as
++ * published by the Free Software Foundation, either version 3 of
++ * the License, or (at your option) any later version.
++ *
++ * srsRAN is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU Affero General Public License for more details.
++ *
++ * A copy of the GNU Affero General Public License can be found in
++ * the LICENSE file in the top-level directory of this distribution
++ * and at http://www.gnu.org/licenses/.
++ *
++ */
++
++#include "../lib/scheduler/fapo/fapo_control_server.h"
++#include "gtest/gtest.h"
++#include <fmt/format.h>
++#include <arpa/inet.h>
++#include <cstring>
++#include <netinet/in.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <thread>
++#include <unistd.h>
++
++using namespace srsran;
++
++namespace {
++
++/// Removes a substring surrounded by the given delimiters, returning the content in between.
++std::string extract_between(const std::string& haystack, const std::string& begin, const std::string& end)
++{
++  auto pos = haystack.find(begin);
++  if (pos == std::string::npos) {
++    return {};
++  }
++  pos += begin.size();
++  auto endpos = haystack.find(end, pos);
++  if (endpos == std::string::npos) {
++    return {};
++  }
++  return haystack.substr(pos, endpos - pos);
++}
++
++/// Minimal blocking client used to drive the real control server over the wire.
++struct test_client {
++  int fd = -1;
++
++  bool connect_unix(const std::string& path)
++  {
++    fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
++    if (fd < 0) {
++      return false;
++    }
++    struct sockaddr_un addr{};
++    addr.sun_family = AF_UNIX;
++    std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
++    if (::connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
++      ::close(fd);
++      fd = -1;
++      return false;
++    }
++    struct timeval tv{5, 0};
++    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
++    return true;
++  }
++
++  std::string send_line(const std::string& line)
++  {
++    std::string req = line + "\n";
++    ssize_t     n   = ::send(fd, req.data(), req.size(), 0);
++    if (n < 0) {
++      return {};
++    }
++    std::string resp;
++    char        buf[4096];
++    while (resp.find('\n') == std::string::npos) {
++      n = ::recv(fd, buf, sizeof(buf), 0);
++      if (n <= 0) {
++        break;
++      }
++      resp.append(buf, static_cast<size_t>(n));
++    }
++    if (!resp.empty() and resp.back() == '\n') {
++      resp.pop_back();
++    }
++    return resp;
++  }
++
++  ~test_client()
++  {
++    if (fd >= 0) {
++      ::close(fd);
++    }
++  }
++};
++
++fapo_control_expert_config make_test_cfg(const std::string& sock_path)
++{
++  fapo_control_expert_config cfg;
++  cfg.enabled     = true;
++  cfg.endpoint    = "unix://" + sock_path;
++  cfg.telemetry_period = std::chrono::milliseconds{50};
++  return cfg;
++}
++
++fapo_cell_snapshot make_test_snapshot()
++{
++  fapo_cell_snapshot snap;
++  snap.active     = true;
++  snap.pci        = 1;
++  snap.prbs_total = 51;
++  snap.slots_per_sec = 2000;
++  snap.scs_khz    = 30;
++  snap.nof_dl_harq_acks  = 900;
++  snap.nof_dl_harq_nacks = 100;
++
++  // Reserved default DRB slice.
++  fapo_slice_snapshot& drb = snap.slices[snap.nof_slices++];
++  drb.id                   = DEFAULT_DRB_RAN_SLICE_ID;
++  std::strncpy(drb.name.data(), "default", drb.name.size() - 1);
++  drb.priority    = 0;
++  drb.min_prbs    = 0;
++  drb.max_prbs    = 51;
++  drb.nof_ues     = 1;
++  drb.pending_dl_bytes = 40000;
++  drb.avg_dl_rbs_per_slot = 10.0F;
++  drb.sst         = 0;
++
++  // Configured slice with SST 2 and SD 0xa.
++  fapo_slice_snapshot& sst2 = snap.slices[snap.nof_slices++];
++  sst2.id                   = ran_slice_id_t{2};
++  std::strncpy(sst2.name.data(), "sst2-sd0xa", sst2.name.size() - 1);
++  sst2.priority    = 8;
++  sst2.min_prbs    = 5;
++  sst2.max_prbs    = 20;
++  sst2.nof_ues     = 2;
++  sst2.pending_dl_bytes = 100000;
++  sst2.pending_ul_bytes = 50000;
++  sst2.avg_dl_rbs_per_slot = 4.5F;
++  sst2.sst         = 2;
++
++  return snap;
++}
++
++void wait_for_socket(const std::string& path)
++{
++  for (unsigned i = 0; i != 100; ++i) {
++    if (::access(path.c_str(), F_OK) == 0) {
++      return;
++    }
++    std::this_thread::sleep_for(std::chrono::milliseconds{20});
++  }
++  FAIL() << "FAPO control server socket did not appear";
++}
++
++} // namespace
++
++TEST(fapo_telemetry_store, publish_and_read_roundtrip)
++{
++  fapo_telemetry_store store;
++  fapo_cell_snapshot   out;
++  ASSERT_FALSE(store.read(to_du_cell_index(0), out));
++
++  fapo_cell_snapshot snap = make_test_snapshot();
++  store.publish(to_du_cell_index(0), snap);
++  ASSERT_TRUE(store.read(to_du_cell_index(0), out));
++  ASSERT_TRUE(out.active);
++  ASSERT_EQ(out.prbs_total, 51U);
++  ASSERT_EQ(out.nof_slices, 2U);
++  ASSERT_EQ(std::string(out.slices[1].name.data()), std::string("sst2-sd0xa"));
++}
++
++TEST(fapo_telemetry_store, concurrent_publish_read)
++{
++  fapo_telemetry_store store;
++  std::atomic<bool>    stop{false};
++
++  std::thread writer([&store, &stop]() {
++    fapo_cell_snapshot snap = make_test_snapshot();
++    for (unsigned i = 0; not stop.load(std::memory_order_relaxed); ++i) {
++      snap.pci = 1 + (i % 3);
++      store.publish(to_du_cell_index(0), snap);
++    }
++  });
++
++  // Read concurrently; every successful read must be a consistent snapshot.
++  for (unsigned i = 0; i != 10000; ++i) {
++    fapo_cell_snapshot out;
++    if (store.read(to_du_cell_index(0), out)) {
++      ASSERT_TRUE(out.active);
++      ASSERT_EQ(out.prbs_total, 51U);
++      ASSERT_EQ(out.nof_slices, 2U);
++      ASSERT_TRUE(out.pci >= 1 and out.pci <= 3);
++    }
++  }
++  stop.store(true);
++  writer.join();
++}
++
++TEST(fapo_control_server, protocol_end_to_end)
++{
++  const std::string sock_path = fmt::format("/tmp/fapo_control_server_test_{}.sock", ::getpid());
++  fapo_context      ctx;
++  {
++    fapo_control_expert_config cfg = make_test_cfg(sock_path);
++
++    fapo_control_server server(cfg, ctx);
++    wait_for_socket(sock_path);
++
++    test_client cl;
++    ASSERT_TRUE(cl.connect_unix(sock_path));
++
++    // hello.
++    std::string resp = cl.send_line(R"({"v":1,"id":1,"op":"hello"})");
++    EXPECT_NE(resp.find("\"ok\":true"), std::string::npos);
++    EXPECT_NE(resp.find("\"server\":\"srsran-fapo-control\""), std::string::npos);
++    EXPECT_NE(resp.find("\"protocol\":1"), std::string::npos);
++
++    // ping.
++    resp = cl.send_line(R"({"v":1,"id":2,"op":"ping"})");
++    EXPECT_NE(resp.find("\"pong\":true"), std::string::npos);
++
++    // telemetry before any cell is configured.
++    resp = cl.send_line(R"({"v":1,"id":3,"op":"get_telemetry"})");
++    EXPECT_NE(resp.find("\"ok\":true"), std::string::npos);
++    EXPECT_NE(resp.find("\"slices\":{}"), std::string::npos);
++
++    // apply before any cell is configured -> not_ready.
++    resp = cl.send_line(R"({"v":1,"id":4,"op":"apply","actions":[{"slice_id":"sst2-sd0xa","prbs":10}]})");
++    EXPECT_NE(resp.find("\"code\":\"not_ready\""), std::string::npos);
++
++    // Publish a cell snapshot as the slot thread would.
++    ctx.telemetry.publish(to_du_cell_index(0), make_test_snapshot());
++    std::this_thread::sleep_for(std::chrono::milliseconds{50});
++
++    // telemetry now reports the slices and the derived metrics.
++    resp = cl.send_line(R"({"v":1,"id":5,"op":"get_telemetry"})");
++    EXPECT_NE(resp.find("\"ok\":true"), std::string::npos);
++    EXPECT_NE(resp.find("\"sst2-sd0xa\""), std::string::npos);
++    EXPECT_NE(resp.find("\"default\""), std::string::npos);
++    // Queue depth of the configured slice: 150000 bytes / 1000000 reference = 15%.
++    std::string slice_block = extract_between(resp, "\"sst2-sd0xa\":{", "}");
++    ASSERT_FALSE(slice_block.empty());
++    EXPECT_NE(slice_block.find("\"queue_depth\":15.00"), std::string::npos);
++    // Effective policies block reflects the radio limits.
++    EXPECT_NE(resp.find("\"max_prbs\":20"), std::string::npos);
++    EXPECT_NE(resp.find("\"slice_type\":\"rll\""), std::string::npos);
++    // Cell packet loss from the real HARQ counters: 100 / (900 + 100).
++    EXPECT_NE(resp.find("\"packet_loss\":0.10000"), std::string::npos);
++
++    // apply within bounds -> applied, command enqueued with clamped value.
++    resp = cl.send_line(R"({"v":1,"id":6,"op":"apply","actions":[{"slice_id":"sst2-sd0xa","prbs":30,"tx_power_dbm":19}]})");
++    EXPECT_NE(resp.find("\"ok\":true"), std::string::npos);
++    EXPECT_NE(resp.find("\"prbs\":30"), std::string::npos);
++    fapo_command cmd;
++    ASSERT_TRUE(ctx.commands.try_pop(cmd));
++    EXPECT_EQ(static_cast<unsigned>(cmd.cell_index), 0U);
++    EXPECT_FALSE(cmd.reset);
++    EXPECT_EQ(cmd.slice_id.value(), 2U);
++    EXPECT_EQ(cmd.max_rbs, 30U);
++
++    // apply above cell capacity -> clamped.
++    resp = cl.send_line(R"({"v":1,"id":7,"op":"apply","actions":[{"slice_id":"sst2-sd0xa","prbs":999}]})");
++    EXPECT_NE(resp.find("\"prbs\":51"), std::string::npos);
++    ASSERT_TRUE(ctx.commands.try_pop(cmd));
++    EXPECT_EQ(cmd.max_rbs, 51U);
++
++    // unknown slice -> rejected.
++    resp = cl.send_line(R"({"v":1,"id":8,"op":"apply","actions":[{"slice_id":"nope","prbs":5}]})");
++    EXPECT_NE(resp.find("\"reason\":\"unknown_slice\""), std::string::npos);
++
++    // malformed action -> rejected.
++    resp = cl.send_line(R"({"v":1,"id":9,"op":"apply","actions":[{"slice_id":"sst2-sd0xa"}]})");
++    EXPECT_NE(resp.find("\"reason\":\"malformed_action\""), std::string::npos);
++
++    // reset -> one command per active cell.
++    resp = cl.send_line(R"({"v":1,"id":10,"op":"reset"})");
++    EXPECT_NE(resp.find("\"ok\":true"), std::string::npos);
++    ASSERT_TRUE(ctx.commands.try_pop(cmd));
++    EXPECT_TRUE(cmd.reset);
++    EXPECT_EQ(static_cast<unsigned>(cmd.cell_index), 0U);
++
++    // malformed line -> bad_request with null id.
++    resp = cl.send_line("this is not json");
++    EXPECT_NE(resp.find("\"code\":\"bad_request\""), std::string::npos);
++    EXPECT_NE(resp.find("\"id\":null"), std::string::npos);
++
++    // unknown op.
++    resp = cl.send_line(R"({"v":1,"id":11,"op":"dance"})");
++    EXPECT_NE(resp.find("\"code\":\"unknown_op\""), std::string::npos);
++
++    // version mismatch.
++    resp = cl.send_line(R"({"v":2,"id":12,"op":"ping"})");
++    EXPECT_NE(resp.find("\"code\":\"version_mismatch\""), std::string::npos);
++  }
++
++  // Server stopped and socket cleaned up when the context is destroyed.
++  std::this_thread::sleep_for(std::chrono::milliseconds{100});
++}
+diff --git a/tests/unittests/scheduler/fapo/fapo_interop_main.cpp b/tests/unittests/scheduler/fapo/fapo_interop_main.cpp
+new file mode 100644
+index 0000000..022a49d
+--- /dev/null
++++ b/tests/unittests/scheduler/fapo/fapo_interop_main.cpp
+@@ -0,0 +1,138 @@
++/*
++ *
++ * Copyright 2021-2025 Software Radio Systems Limited
++ *
++ * This file is part of srsRAN.
++ *
++ * srsRAN is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU Affero General Public License as
++ * published by the Free Software Foundation, either version 3 of
++ * the License, or (at your option) any later version.
++ *
++ * srsRAN is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU Affero General Public License for more details.
++ *
++ * A copy of the GNU Affero General Public License can be found in
++ * the LICENSE file in the top-level directory of this distribution
++ * and at http://www.gnu.org/licenses/.
++ *
++ */
++
++/// \file
++/// \brief Cross-language interop test fixture for the FAPO control server.
++///
++/// This is a TEST HARNESS, not part of the gNB: it instantiates the real
++/// \c fapo_control_server (the same class that runs inside the patched scheduler) and
++/// publishes deterministic telemetry snapshots from a background thread, emulating the
++/// slot-thread publisher. External clients (e.g. the Python \c SRSRANAdapter) can then
++/// drive the full FAPO v1 protocol against the real server implementation.
++///
++/// The applied commands are drained and echoed to stdout so test clients can verify the
++/// scheduler-side effect.
++
++#include "../../../lib/scheduler/fapo/fapo_control_server.h"
++#include "srsran/srslog/srslog.h"
++#include <atomic>
++#include <chrono>
++#include <csignal>
++#include <cstdio>
++#include <thread>
++
++using namespace srsran;
++
++static std::atomic<bool> g_stop{false};
++
++static void signal_handler(int)
++{
++  g_stop.store(true);
++}
++
++int main(int argc, char** argv)
++{
++  if (argc < 2) {
++    fmt::print("usage: {} <endpoint> [runtime_seconds]\n", argv[0]);
++    return 1;
++  }
++  const std::string endpoint = argv[1];
++  const unsigned    runtime_s = argc > 2 ? static_cast<unsigned>(std::atoi(argv[2])) : 30;
++
++  srslog::init();
++
++  fapo_control_expert_config cfg;
++  cfg.enabled  = true;
++  cfg.endpoint = endpoint;
++
++  fapo_context ctx(1024);
++
++  fapo_control_server server(cfg, ctx);
++
++  // Background thread emulating the scheduler slot-thread publisher: publishes a snapshot
++  // of a cell with two slices (default DRB + SST2/SD0xa) and applies drained commands.
++  std::thread worker([&ctx, &g_stop]() {
++    fapo_cell_snapshot snap;
++    snap.active       = true;
++    snap.pci          = 1;
++    snap.prbs_total   = 51;
++    snap.slots_per_sec = 2000;
++    snap.scs_khz      = 30;
++
++    fapo_slice_snapshot& drb = snap.slices[snap.nof_slices++];
++    drb.id                   = DEFAULT_DRB_RAN_SLICE_ID;
++    std::snprintf(drb.name.data(), drb.name.size(), "default");
++    drb.min_prbs = 0;
++    drb.max_prbs = 51;
++    drb.sst      = 0;
++
++    fapo_slice_snapshot& sst2 = snap.slices[snap.nof_slices++];
++    sst2.id                   = ran_slice_id_t{2};
++    std::snprintf(sst2.name.data(), sst2.name.size(), "sst2-sd0xa");
++    sst2.priority = 8;
++    sst2.min_prbs = 5;
++    sst2.max_prbs = 20;
++    sst2.sst      = 2;
++
++    unsigned tick = 0;
++    while (not g_stop.load()) {
++      // Slowly vary the queue fill so clients can observe motion.
++      unsigned pend            = 40000 + (tick % 100) * 1000;
++      sst2.pending_dl_bytes    = pend;
++      sst2.pending_ul_bytes    = pend / 2;
++      sst2.nof_ues             = 2;
++      sst2.avg_dl_rbs_per_slot = 4.5F;
++      snap.nof_dl_harq_acks    = 900;
++      snap.nof_dl_harq_nacks   = 100;
++
++      ctx.telemetry.publish(to_du_cell_index(0), snap);
++
++      // Drain commands like the scheduler slot thread would.
++      fapo_command cmd;
++      while (ctx.commands.try_pop(cmd)) {
++        if (cmd.reset) {
++          fmt::print("APPLIED_RESET cell={}\n", static_cast<unsigned>(cmd.cell_index));
++        } else {
++          fmt::print("APPLIED cell={} slice={} max_rbs={}\n",
++                     static_cast<unsigned>(cmd.cell_index),
++                     cmd.slice_id.value(),
++                     cmd.max_rbs);
++        }
++        std::fflush(stdout);
++      }
++
++      ++tick;
++      std::this_thread::sleep_for(std::chrono::milliseconds{50});
++    }
++  });
++
++  std::signal(SIGINT, signal_handler);
++  std::signal(SIGTERM, signal_handler);
++
++  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{runtime_s};
++  while (not g_stop.load() and std::chrono::steady_clock::now() < deadline) {
++    std::this_thread::sleep_for(std::chrono::milliseconds{100});
++  }
++
++  worker.join();
++  return 0;
++}
+-- 
+2.47.3
+

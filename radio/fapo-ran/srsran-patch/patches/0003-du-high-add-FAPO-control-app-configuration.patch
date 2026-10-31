@@ -1,0 +1,159 @@
+From d4c2a06c9b77ae617a44282a02a540cc285e71ee Mon Sep 17 00:00:00 2001
+From: FAPO Integration <fapo-dev@example.local>
+Date: Sat, 12 Sep 2026 04:05:19 +0000
+Subject: [PATCH 3/4] du-high: add FAPO control app configuration
+
+Expose the FAPO control interface configuration in the DU-high unit
+configuration (gNB YAML/CLI):
+
+  fapo_control:
+    enabled: true
+    endpoint: tcp://127.0.0.1:4445
+    ...
+
+The section is translated into the FAPO scheduler expert configuration
+and included in the YAML schema writer.
+---
+ .../o_du_high/du_high/du_high_config.h        | 24 ++++++++++++
+ .../du_high/du_high_config_cli11_schema.cpp   | 38 +++++++++++++++++++
+ .../du_high/du_high_config_translators.cpp    | 11 ++++++
+ .../du_high/du_high_config_yaml_writer.cpp    | 12 ++++++
+ 4 files changed, 85 insertions(+)
+
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/du_high_config.h b/apps/units/flexible_o_du/o_du_high/du_high/du_high_config.h
+index e33e1ae..0ad3bcc 100644
+--- a/apps/units/flexible_o_du/o_du_high/du_high/du_high_config.h
++++ b/apps/units/flexible_o_du/o_du_high/du_high/du_high_config.h
+@@ -1128,6 +1128,28 @@ struct du_high_unit_qos_config {
+   du_high_unit_f1u_du_config f1u_du;
+ };
+ 
++/// FAPO control interface configuration.
++struct du_high_unit_fapo_config {
++  /// Enable the FAPO control server of the scheduler.
++  bool enabled = false;
++  /// Endpoint the FAPO control server listens on: "tcp://host:port" or "unix:///path/to/socket".
++  std::string endpoint = "tcp://127.0.0.1:4445";
++  /// Whether the TCP endpoint is allowed to bind on a non-loopback address.
++  bool allow_remote = false;
++  /// Periodicity of telemetry snapshot publication, in ms.
++  unsigned telemetry_period_ms = 1000;
++  /// Maximum number of concurrently connected control clients.
++  unsigned max_clients = 4;
++  /// Reference queue size, in bytes, used to normalize the per-slice queue depth to a 0..100 percentage.
++  unsigned queue_ref_bytes = 1000000;
++  /// Transport block bytes per granted RB per slot, used to estimate service rates and queueing latencies.
++  unsigned tb_bytes_per_rb_slot = 200;
++  /// Nominal cell TX power, in dBm, reported in the telemetry (FAPO power actions are advisory only).
++  unsigned nominal_tx_power_dbm = 0;
++  /// Upper bound, in ms, reported as the slice max latency policy.
++  unsigned max_latency_ms = 1000;
++};
++
+ /// DU high configuration.
+ struct du_high_unit_config {
+   bool warn_on_drop = false;
+@@ -1155,6 +1177,8 @@ struct du_high_unit_config {
+   du_high_unit_expert_execution_config expert_execution_cfg;
+   /// SRB configuration.
+   std::map<srb_id_t, du_high_unit_srb_config> srb_cfg;
++  /// FAPO control interface configuration.
++  du_high_unit_fapo_config fapo_cfg;
+ 
+   /// Returns true if testmode is enabled, false otherwise.
+   bool is_testmode_enabled() const { return test_mode_cfg.test_ue.rnti != rnti_t::INVALID_RNTI; }
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/du_high_config_cli11_schema.cpp b/apps/units/flexible_o_du/o_du_high/du_high/du_high_config_cli11_schema.cpp
+index 6aa8832..a57084d 100644
+--- a/apps/units/flexible_o_du/o_du_high/du_high/du_high_config_cli11_schema.cpp
++++ b/apps/units/flexible_o_du/o_du_high/du_high/du_high_config_cli11_schema.cpp
+@@ -1974,6 +1974,44 @@ void srsran::configure_cli11_with_du_high_config_schema(CLI::App& app, du_high_p
+   CLI::App* pcap_subcmd = add_subcommand(app, "pcap", "PCAP configuration")->configurable();
+   configure_cli11_pcap_args(*pcap_subcmd, parsed_cfg.config.pcaps);
+ 
++  // FAPO control section.
++  CLI::App* fapo_subcmd = add_subcommand(app, "fapo_control", "FAPO control interface configuration")->configurable();
++  add_option(*fapo_subcmd, "--enabled", parsed_cfg.config.fapo_cfg.enabled, "Enable FAPO control interface");
++  add_option(*fapo_subcmd,
++             "--endpoint",
++             parsed_cfg.config.fapo_cfg.endpoint,
++             "FAPO control endpoint (tcp://host:port or unix:///path)");
++  add_option(*fapo_subcmd,
++             "--allow_remote",
++             parsed_cfg.config.fapo_cfg.allow_remote,
++             "Allow binding the FAPO control TCP endpoint on a non-loopback address");
++  add_option(*fapo_subcmd,
++             "--telemetry_period_ms",
++             parsed_cfg.config.fapo_cfg.telemetry_period_ms,
++             "Periodicity of FAPO telemetry publication in ms")
++      ->check(CLI::Range(10u, 60000u));
++  add_option(*fapo_subcmd,
++             "--max_clients",
++             parsed_cfg.config.fapo_cfg.max_clients,
++             "Maximum number of concurrently connected FAPO control clients")
++      ->check(CLI::Range(1u, 16u));
++  add_option(*fapo_subcmd,
++             "--queue_ref_bytes",
++             parsed_cfg.config.fapo_cfg.queue_ref_bytes,
++             "Reference queue size in bytes used to normalize the slice queue depth percentage");
++  add_option(*fapo_subcmd,
++             "--tb_bytes_per_rb_slot",
++             parsed_cfg.config.fapo_cfg.tb_bytes_per_rb_slot,
++             "Transport block bytes per granted RB per slot used for service rate estimation");
++  add_option(*fapo_subcmd,
++             "--nominal_tx_power_dbm",
++             parsed_cfg.config.fapo_cfg.nominal_tx_power_dbm,
++             "Nominal cell TX power in dBm reported in the FAPO telemetry");
++  add_option(*fapo_subcmd,
++             "--max_latency_ms",
++             parsed_cfg.config.fapo_cfg.max_latency_ms,
++             "Slice max latency bound in ms reported in the FAPO policies");
++
+   // Common cell section.
+   CLI::App* common_cell_subcmd = add_subcommand(app, "cell_cfg", "Default cell configuration")->configurable();
+   configure_cli11_common_cell_args(*common_cell_subcmd, parsed_cfg.common_cell_cfg);
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/du_high_config_translators.cpp b/apps/units/flexible_o_du/o_du_high/du_high/du_high_config_translators.cpp
+index 13bc0fb..4f2b00c 100644
+--- a/apps/units/flexible_o_du/o_du_high/du_high/du_high_config_translators.cpp
++++ b/apps/units/flexible_o_du/o_du_high/du_high/du_high_config_translators.cpp
+@@ -1212,6 +1212,17 @@ static scheduler_expert_config generate_scheduler_expert_config(const du_high_un
+   out_cfg.log_broadcast_messages       = config.loggers.broadcast_enabled;
+   out_cfg.log_high_latency_diagnostics = config.loggers.high_latency_diagnostics_enabled;
+ 
++  // FAPO control interface.
++  out_cfg.fapo.enabled             = config.fapo_cfg.enabled;
++  out_cfg.fapo.endpoint            = config.fapo_cfg.endpoint;
++  out_cfg.fapo.allow_remote        = config.fapo_cfg.allow_remote;
++  out_cfg.fapo.telemetry_period    = std::chrono::milliseconds{config.fapo_cfg.telemetry_period_ms};
++  out_cfg.fapo.max_clients         = config.fapo_cfg.max_clients;
++  out_cfg.fapo.queue_ref_bytes     = config.fapo_cfg.queue_ref_bytes;
++  out_cfg.fapo.tb_bytes_per_rb_slot = config.fapo_cfg.tb_bytes_per_rb_slot;
++  out_cfg.fapo.nominal_tx_power_dbm = config.fapo_cfg.nominal_tx_power_dbm;
++  out_cfg.fapo.max_latency_ms      = config.fapo_cfg.max_latency_ms;
++
+   const error_type<std::string> error = is_scheduler_expert_config_valid(out_cfg);
+   if (!error) {
+     report_error("Invalid scheduler expert configuration detected.\n");
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/du_high_config_yaml_writer.cpp b/apps/units/flexible_o_du/o_du_high/du_high/du_high_config_yaml_writer.cpp
+index cff68a2..3c792a4 100644
+--- a/apps/units/flexible_o_du/o_du_high/du_high/du_high_config_yaml_writer.cpp
++++ b/apps/units/flexible_o_du/o_du_high/du_high/du_high_config_yaml_writer.cpp
+@@ -883,4 +883,16 @@ void srsran::fill_du_high_config_in_yaml_schema(YAML::Node& node, const du_high_
+   fill_qos_section(node, config.qos_cfg);
+   build_du_high_cells_section(node, config.cells_cfg);
+   build_du_high_sbr_section(node, config.srb_cfg);
++
++  YAML::Node fapo_node;
++  fapo_node["enabled"]               = config.fapo_cfg.enabled;
++  fapo_node["endpoint"]              = config.fapo_cfg.endpoint;
++  fapo_node["allow_remote"]          = config.fapo_cfg.allow_remote;
++  fapo_node["telemetry_period_ms"]   = config.fapo_cfg.telemetry_period_ms;
++  fapo_node["max_clients"]           = config.fapo_cfg.max_clients;
++  fapo_node["queue_ref_bytes"]       = config.fapo_cfg.queue_ref_bytes;
++  fapo_node["tb_bytes_per_rb_slot"]  = config.fapo_cfg.tb_bytes_per_rb_slot;
++  fapo_node["nominal_tx_power_dbm"]  = config.fapo_cfg.nominal_tx_power_dbm;
++  fapo_node["max_latency_ms"]        = config.fapo_cfg.max_latency_ms;
++  node["fapo_control"]               = fapo_node;
+ }
+-- 
+2.47.3
+
