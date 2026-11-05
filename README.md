@@ -6,6 +6,9 @@ Edge runtime projects for the Samsung Galaxy S26 Ultra and Ingeniosity's on-devi
 
 - [AVA-007 Edge Connectivity Runbook](docs/AVA007_EDGE_CONNECTIVITY_RUNBOOK.md) — S26 Ultra/eSIM boundaries, embedded Tailscale Android SDK, private tunnel to OVH VPS, Aperture, OpenSandbox, and acceptance tests.
 
+
+- [Distributed coordination research integration](docs/DISTRIBUTED_COORDINATION_ARXIV_2401_18030.md) — Rust consensus primitives, superiorization-inspired safe candidate selection, digital telemetry aggregation, and explicit boundaries against unproven convergence/physical OTA-C claims.
+
 ## Android apps
 
 - [Ava007 Dialer](apps/Ava007-Dialer/README.md) — self-managed Android VoIP dialer and Telnyx integration.
