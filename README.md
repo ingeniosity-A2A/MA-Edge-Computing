@@ -5,11 +5,9 @@ Edge runtime projects for the Samsung Galaxy S26 Ultra and Ingeniosity's on-devi
 ## Architecture and deployment
 
 - [AVA-007 Edge Connectivity Runbook](docs/AVA007_EDGE_CONNECTIVITY_RUNBOOK.md) — S26 Ultra/eSIM boundaries, embedded Tailscale Android SDK, private tunnel to OVH VPS, Aperture, OpenSandbox, and acceptance tests.
-
-
-- [Distributed coordination research integration](docs/DISTRIBUTED_COORDINATION_ARXIV_2401_18030.md) — Rust consensus primitives, superiorization-inspired safe candidate selection, digital telemetry aggregation, and explicit boundaries against unproven convergence/physical OTA-C claims.
-
-- [Deep Fusion Memory integration](docs/DEEP_FUSION_MEMORY_ARXIV_2610_25100.md) — DFM research mapping, promotion scaffold, and explicit boundary between governance code and unimplemented learned hidden-state fusion.
+- [Distributed coordination research integration](docs/DISTRIBUTED_COORDINATION_ARXIV_2401_18030.md) — Rust coordination primitives with explicit limits on convergence and physical OTA-C claims.
+- [Deep Fusion Memory integration](docs/DEEP_FUSION_MEMORY_ARXIV_2610_25100.md) — DFM governance scaffold; no claim of trained hidden-state fusion.
+- [24/16 Intelligence Coupling and execution integration](docs/INTELLIGENCE_COUPLING_24_16.md) — executable Rust evidence coupling, candidate registry, AVA-007 authority boundary, and NVIDIA Aerial research mapping.
 
 ## Android apps
 
@@ -22,8 +20,13 @@ Each app owns its Android/Gradle build configuration. Do not merge app-specific 
 
 ## RAN and radio stack
 
-- [FAPO RAN Capability](radio/fapo-ran/README.md) — Lyapunov drift-plus-penalty radio policy optimizer, isolated RAN capability API, safety envelope, srsRAN JSON-Lines control adapter, digital twin, interoperability tooling, and the pinned srsRAN Project patch series.
+- [FAPO RAN Capability](radio/fapo-ran/README.md) — Lyapunov drift-plus-penalty optimizer, safety envelope, srsRAN adapter, digital twin, interoperability tooling, and pinned patch series.
+- [Hardware-free RAN profile](radio/fapo-ran/docs/HARDWARE_FREE_RAN_PROFILE.md) and [machine-readable profile](packages/csn/ran-5g.yaml) — VPS-hosted FAPO twin for software-only clients, with synthetic provenance and explicit hardware boundaries.
 
-- [Hardware-free RAN profile](radio/fapo-ran/docs/HARDWARE_FREE_RAN_PROFILE.md) and [machine-readable profile](packages/csn/ran-5g.yaml) — VPS-hosted FAPO digital-twin mode for software-only edge clients, with synthetic-data provenance and explicit unintegrated-hardware boundaries.
+FAPO does not turn the Galaxy S26 Ultra handset modem into a programmable gNodeB. Real RAN operation requires supported SDR/RF hardware, a compatible srsRAN build, and an authorized test network. Start with the digital twin.
 
-FAPO controls a separately deployed srsRAN gNB through its adapter. It does not turn the Galaxy S26 Ultra's Qualcomm handset modem into a programmable gNodeB. The handset remains a UE; real RAN operation requires a supported SDR/RF front end, the patched srsRAN Project build, and a properly authorized test network. Start with the digital twin before connecting radio hardware.
+## Authority and execution contract
+
+AVA-007 owns objectives, interpretation, Source Truth acceptance, curation, promotion, and action authorization. Exoskeleton owns runtime execution, persistence mechanics, synchronization, scheduling, transport, and resource governance. REV.IKE is read-only interpretation and candidate generation; it cannot accept proposals, write Source Truth, authorize promotion, or execute actions.
+
+The air-coupling crate coordinates evidence only. It does not merge weights, promote models, or execute actions. Hardware-dependent capabilities remain disabled until prerequisites and tests are verified.

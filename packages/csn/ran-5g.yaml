@@ -1,15 +1,13 @@
 # MA Edge Computing — hardware-free RAN profile
-# Schema status: declarative integration profile; not yet consumed by the
-# current fapo-ran CLI. The executable path today is radio/fapo-ran/bootstrap.py
-# with --twin. Do not treat declared targets as measured results.
+# Declarative profile; the in-process FAPO twin is the executable baseline.
 apiVersion: "v1"
 kind: RANProfile
 metadata:
   name: ran-5g-software-twin
-  version: "1.0.0"
+  version: "1.1.0"
   description: >-
-    Hardware-free RAN development profile. RAN policy and the digital-twin
-    adapter execute on the VPS. The S26 Ultra is a telemetry/policy client only.
+    Hardware-free RAN development profile. FAPO and the digital twin execute
+    on the VPS. The S26 Ultra is a software edge client only.
 spec:
   execution:
     ran_host: vps
@@ -19,34 +17,18 @@ spec:
     default_adapter: in_process_digital_twin
     command:
       working_directory: radio/fapo-ran
-      argv:
-        - python
-        - bootstrap.py
-        - --twin
-        - --period
-        - "1.0"
+      argv: [python, bootstrap.py, --twin, --period, "1.0"]
     control_period_seconds: 1.0
     timing:
       required_policy_compute_ms: null
-      note: >-
-        The existing control loop defaults to a 1-second cadence. A 5 ms
-        end-to-end or policy-compute guarantee is not established and must
-        not be inferred from a configuration target.
+      note: One-second cadence is current default; no 5 ms guarantee is established.
   telemetry:
     provenance_required: true
-    synthetic_fields:
-      source: simulation
-      is_synthetic: true
+    synthetic_fields: {source: simulation, is_synthetic: true}
     inputs:
-      - name: virtual_ran_telemetry
-        source: in_process_digital_twin
-        status: implemented
-      - name: ue_event_log
-        source: software_client
-        status: planned
-      - name: aerial_metrics
-        source: external_aerial_integration
-        status: not_integrated
+      - {name: virtual_ran_telemetry, source: in_process_digital_twin, status: implemented}
+      - {name: ue_event_log, source: software_client, status: planned}
+      - {name: aerial_metrics, source: external_aerial_integration, status: not_integrated}
     reject_unlabelled_hardware_claims: true
   policy:
     optimizer: FAPO_LDPTRLQ
@@ -55,89 +37,76 @@ spec:
     adapter: radio/fapo-ran/ran_capability/srsran/twin.py
     authority: vps
     handset_policy_role: consume_only
+  intelligence:
+    coupling_engine:
+      crate: air-ava007/crates/air-coupling
+      profile: "24/16"
+      input_slots: 24
+      shared_state_dimensions: 16
+      status: source_committed_tests_not_run
+      authority: ava007
+      output: advisory_candidate_state
+      weight_merging: false
+      semantic_constraints_require_domain_validators: true
+    nvidia_aerial_spectral_efficiency:
+      type: research_extraction_directive
+      source: "https://developer.nvidia.com/blog/maximize-spectral-efficiency-with-ai-native-ran-and-nvidia-ai-aerial"
+      source_status: user_supplied_reference_not_independently_fetched
+      publication_date: "2026-07-07"
+      hash: null
+      status: not_integrated
+      enabled: false
+      requirements: [supported_nvidia_gpu, compatible_driver_cuda_and_aerial_sdk, license_review, end_to_end_compatibility_test]
+      curate_metadata_only: [channel_estimation_profiles, beamforming_profile_metadata_64t64r, mu_mimo_scheduler_policy_metadata, spectral_efficiency_benchmark_metadata, measured_gpu_l1_l2_latency_profiles]
+      skip: [proprietary_cuda_binaries, container_images, deployment_manifests, unlicensed_weight_or_firmware_artifacts]
+      extraction_limit_bytes: 15000000
+      destinations: [vps_fapo_policy_research, vps_gate_calibration_review]
+      claim_controls:
+        vendor_projections_are_not_measurements: true
+        spectral_efficiency_gain_is_not_a_guarantee: true
+        aerial_latency_targets_are_unverified: true
+        aerial_is_not_the_digital_twin: true
+      note: >-
+        The cited greater-than-100-percent 2028 spectral-efficiency claim is a
+        vendor-reported projection, not a measurement, FAPO guarantee, or
+        executable optimizer ceiling. Beamforming weights and latency figures
+        require licensed, verifiable sources.
   software_replacements:
-    radio_unit:
-      implementation: in_process_digital_twin
-      status: implemented
-      limitation: >-
-        Models queue/service and policy response; it is not an RF radio unit,
-        3GPP channel simulator, or over-the-air RAN.
-    rf_input:
-      implementation: none
-      candidate: srsran_file_source
-      status: not_integrated
-      limitation: >-
-        IQ file replay requires a compatible srsRAN RF configuration and
-        validated sample format. It is not enabled by this profile.
-    gnb:
-      implementation: fapo_ran_digital_twin
-      status: implemented_for_policy_testing
-      limitation: >-
-        Existing twin is an in-process model, not a full executable 5G gNB.
-    ue:
-      implementation: none
-      candidate: srsran_virtual_ue
-      status: not_integrated
+    radio_unit: {implementation: in_process_digital_twin, status: implemented, limitation: not_an_RF_RU_or_3GPP_channel_simulator}
+    rf_input: {implementation: none, candidate: srsran_file_source, status: not_integrated}
+    gnb: {implementation: fapo_ran_digital_twin, status: implemented_for_policy_testing, limitation: not_a_full_executable_5g_gnb}
+    ue: {implementation: none, candidate: srsran_virtual_ue, status: not_integrated}
     modem_telemetry:
       implementation: virtual_telemetry_generator
       status: planned
-      provenance:
-        source: simulation
-        is_synthetic: true
+      provenance: {source: simulation, is_synthetic: true}
     esim:
       implementation: virtual_profile_state
       status: planned
-      limitation: >-
-        Software state simulation only. No eUICC, eSIM provisioning,
-        carrier activation, or subscription credentials are emulated.
-      lpac:
-        enabled: false
-        status: not_a_hardware_replacement
+      limitation: software state only; no eUICC, provisioning, carrier activation, or credentials
+      lpac: {enabled: false, status: not_a_hardware_replacement}
     gpu_ran:
       implementation: nvidia_aerial
       enabled: false
       status: not_integrated
-      limitation: >-
-        Aerial cuPHY/cuMAC execution requires a supported NVIDIA GPU and
-        compatible software stack. No GPU availability is established for
-        the current VPS. Do not claim Aerial runtime execution.
+      limitation: Requires supported NVIDIA GPU and compatible software stack; none established on current VPS.
   safety:
-    handset_must_not_access:
-      - raw_modem_interfaces
-      - AT_command_interfaces
-      - direct_RIL_control
-      - mmcli
-      - lpac
-      - srsue
-    telemetry_contract:
-      synthetic_source_label_required: true
-      prohibit_synthetic_as_carrier_truth: true
+    handset_must_not_access: [raw_modem_interfaces, AT_command_interfaces, direct_RIL_control, mmcli, lpac, srsue]
+    telemetry_contract: {synthetic_source_label_required: true, prohibit_synthetic_as_carrier_truth: true}
     policy_fail_closed: true
     baseline_on_stale_telemetry: true
   validation:
-    executable_baseline:
-      command: python -m pytest tests/ -q
-      working_directory: radio/fapo-ran
-      expected_scope: existing_fapo_tests
-    targets_not_yet_verified:
-      - 5ms_policy_latency
-      - spectral_efficiency_bps_hz
-      - mimo_gap_closure
-      - twin_to_radio_agreement
-      - aerial_l1_latency
-      - aerial_l2_latency
-      - ru_fidelity
-      - complete_hardware_replacement_coverage
+    executable_baseline: {command: "python -m pytest tests/ -q", working_directory: radio/fapo-ran, expected_scope: existing_fapo_tests}
+    coupling: {command: "cargo test -p air-coupling", working_directory: air-ava007, status: not_run}
+    targets_not_yet_verified: [5ms_policy_latency, spectral_efficiency_bps_hz, mimo_gap_closure, twin_to_radio_agreement, aerial_l1_latency, aerial_l2_latency, ru_fidelity, complete_hardware_replacement_coverage, local_model_task_quality, 64mb_derived_index]
     rule: >-
-      A target becomes verified only when a reproducible test, measured
-      output, environment details, and input artifact hashes are committed.
+      Verification requires reproducible test output, environment details,
+      measurement method, and input artifact hashes.
   transport:
     phone_to_vps: rustunnel
     endpoint: "tcp://vps:9100"
     status: planned
-    note: >-
-      Endpoint is a deployment placeholder, not a live listener or verified
-      Rustunnel route. Bind and authenticate it before use.
+    note: Placeholder, not a verified listener or route.
   rollback:
     strategy: disable_profile_and_return_to_existing_fapo_twin
     artifact: null
