@@ -19,4 +19,6 @@ Each app owns its Android/Gradle build configuration. Do not merge app-specific 
 
 - [FAPO RAN Capability](radio/fapo-ran/README.md) — Lyapunov drift-plus-penalty radio policy optimizer, isolated RAN capability API, safety envelope, srsRAN JSON-Lines control adapter, digital twin, interoperability tooling, and the pinned srsRAN Project patch series.
 
+- [Hardware-free RAN profile](radio/fapo-ran/docs/HARDWARE_FREE_RAN_PROFILE.md) and [machine-readable profile](packages/csn/ran-5g.yaml) — VPS-hosted FAPO digital-twin mode for software-only edge clients, with synthetic-data provenance and explicit unintegrated-hardware boundaries.
+
 FAPO controls a separately deployed srsRAN gNB through its adapter. It does not turn the Galaxy S26 Ultra's Qualcomm handset modem into a programmable gNodeB. The handset remains a UE; real RAN operation requires a supported SDR/RF front end, the patched srsRAN Project build, and a properly authorized test network. Start with the digital twin before connecting radio hardware.
