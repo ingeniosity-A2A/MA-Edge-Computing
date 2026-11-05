@@ -33,6 +33,10 @@ The phone's cellular connection is the upstream network. Tailscale supplies encr
 - `apps/Ava007-GenieX/` is a separate on-device inference integration. Do not mix its Gradle dependencies into the Tailscale SDK project.
 - The SDK AAR build is not equivalent to embedding a working node in Ava007's app. The host app still needs an explicit integration, Android VPN/user-consent handling, node state lifecycle, and on-device tests.
 
+### S26 inference runtime boundary
+
+The Samsung Galaxy S26 Ultra is the physical Android/ARM64 host. It is not ONNX Runtime, and the presence of an ONNX model does not imply that ONNX Runtime is installed. ONNX Runtime is an optional software adapter; it is not a device or a hardware accelerator. Keep model artifact, inference runtime, execution provider, and CPU/GPU/NPU hardware distinct. Select a runtime only after discovering what the target Android build actually exposes. Record provider diagnostics and target-device evidence before reporting GPU/NPU execution. The shared contract is [Exoskeleton's Android device/runtime boundary](https://github.com/ingeniosity-A2A/Exoskeleton/blob/main/docs/ANDROID_DEVICE_INFERENCE_RUNTIME_BOUNDARY.md).
+
 ## 2. Critical 5G/eSIM boundary
 
 The Android `EuiccManager` API manages supported eSIM operations when the device exposes eUICC support and the required carrier/platform permissions are satisfied. It is not a software modem API.
