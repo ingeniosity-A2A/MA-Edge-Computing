@@ -9,6 +9,8 @@ Edge runtime projects for the Samsung Galaxy S26 Ultra and Ingeniosity's on-devi
 
 - [Distributed coordination research integration](docs/DISTRIBUTED_COORDINATION_ARXIV_2401_18030.md) — Rust consensus primitives, superiorization-inspired safe candidate selection, digital telemetry aggregation, and explicit boundaries against unproven convergence/physical OTA-C claims.
 
+- [Deep Fusion Memory integration](docs/DEEP_FUSION_MEMORY_ARXIV_2610_25100.md) — DFM research mapping, promotion scaffold, and explicit boundary between governance code and unimplemented learned hidden-state fusion.
+
 ## Android apps
 
 - [Ava007 Dialer](apps/Ava007-Dialer/README.md) — self-managed Android VoIP dialer and Telnyx integration.
