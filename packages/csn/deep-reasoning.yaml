@@ -1,0 +1,48 @@
+# Research integration slot for Deep Fusion Memory (DFM).
+# Reference: https://arxiv.org/abs/2610.25100
+# This file declares an intended slot; it is not a trained model artifact.
+apiVersion: "v1"
+kind: IntelligenceSlot
+metadata:
+  name: deep-fusion-memory
+  version: "2026.11"
+  status: research_specification
+spec:
+  source: "arXiv:2610.25100"
+  implementation:
+    crate: "air-ava007/crates/air-dfm"
+    status: governance_scaffold_only
+    learned_causal_predictor: not_implemented
+    gated_cross_attention: not_implemented
+    parametric_inference: not_implemented
+    training_pipeline: not_implemented
+  artifacts:
+    hash: null
+    max_bytes: 100000000
+    curated_files: []
+    note: >-
+      Do not fabricate hashes or weights. Populate only after the paper's
+      released artifacts or a reproducible training run are curated and
+      independently verified.
+  promotion:
+    authority: mem0_arbitration
+    source_of_truth: rust_atomic_substrate
+    minimum_eval_score: 0.70
+    minimum_context_chain_depth: 2
+    duplicate_similarity: 0.85
+    operations: [ADD, UPDATE, DELETE, NOOP]
+    note: >-
+      Current crate implements candidate validation, ADD/UPDATE/NOOP decisions,
+      and an in-memory registry only. DELETE, durable substrate transactions,
+      and model-weight promotion remain unimplemented.
+  inference:
+    fast_path: unavailable_until_learned_model_is_integrated
+    fallback: dream_rsi_retrieval
+    note: >-
+      The crate does not perform DFM prediction. Similarity is used only for
+      governance-time duplicate detection, not online parametric recall.
+  invariants:
+    - "The frozen backbone is not modified by this integration."
+    - "The atomic substrate remains authoritative."
+    - "Only the gate can authorize model/firmware promotion."
+    - "DFM predictions must be evaluated in the A2A execution ledger."
