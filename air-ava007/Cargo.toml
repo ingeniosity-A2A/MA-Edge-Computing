@@ -6,4 +6,5 @@ members = [
     "crates/air-ledger",
     "crates/air-gate",
     "crates/air-consensus",
+    "crates/air-dfm",
 ]
