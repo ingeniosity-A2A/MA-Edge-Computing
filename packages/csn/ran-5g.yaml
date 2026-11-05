@@ -1,0 +1,144 @@
+# MA Edge Computing — hardware-free RAN profile
+# Schema status: declarative integration profile; not yet consumed by the
+# current fapo-ran CLI. The executable path today is radio/fapo-ran/bootstrap.py
+# with --twin. Do not treat declared targets as measured results.
+apiVersion: "v1"
+kind: RANProfile
+metadata:
+  name: ran-5g-software-twin
+  version: "1.0.0"
+  description: >-
+    Hardware-free RAN development profile. RAN policy and the digital-twin
+    adapter execute on the VPS. The S26 Ultra is a telemetry/policy client only.
+spec:
+  execution:
+    ran_host: vps
+    policy_host: vps
+    phone_role: software_edge_client
+    hardware_mode: software_only
+    default_adapter: in_process_digital_twin
+    command:
+      working_directory: radio/fapo-ran
+      argv:
+        - python
+        - bootstrap.py
+        - --twin
+        - --period
+        - "1.0"
+    control_period_seconds: 1.0
+    timing:
+      required_policy_compute_ms: null
+      note: >-
+        The existing control loop defaults to a 1-second cadence. A 5 ms
+        end-to-end or policy-compute guarantee is not established and must
+        not be inferred from a configuration target.
+  telemetry:
+    provenance_required: true
+    synthetic_fields:
+      source: simulation
+      is_synthetic: true
+    inputs:
+      - name: virtual_ran_telemetry
+        source: in_process_digital_twin
+        status: implemented
+      - name: ue_event_log
+        source: software_client
+        status: planned
+      - name: aerial_metrics
+        source: external_aerial_integration
+        status: not_integrated
+    reject_unlabelled_hardware_claims: true
+  policy:
+    optimizer: FAPO_LDPTRLQ
+    implementation: radio/fapo-ran/ran_capability/fapo.py
+    safety_envelope: radio/fapo-ran/ran_capability/safety.py
+    adapter: radio/fapo-ran/ran_capability/srsran/twin.py
+    authority: vps
+    handset_policy_role: consume_only
+  software_replacements:
+    radio_unit:
+      implementation: in_process_digital_twin
+      status: implemented
+      limitation: >-
+        Models queue/service and policy response; it is not an RF radio unit,
+        3GPP channel simulator, or over-the-air RAN.
+    rf_input:
+      implementation: none
+      candidate: srsran_file_source
+      status: not_integrated
+      limitation: >-
+        IQ file replay requires a compatible srsRAN RF configuration and
+        validated sample format. It is not enabled by this profile.
+    gnb:
+      implementation: fapo_ran_digital_twin
+      status: implemented_for_policy_testing
+      limitation: >-
+        Existing twin is an in-process model, not a full executable 5G gNB.
+    ue:
+      implementation: none
+      candidate: srsran_virtual_ue
+      status: not_integrated
+    modem_telemetry:
+      implementation: virtual_telemetry_generator
+      status: planned
+      provenance:
+        source: simulation
+        is_synthetic: true
+    esim:
+      implementation: virtual_profile_state
+      status: planned
+      limitation: >-
+        Software state simulation only. No eUICC, eSIM provisioning,
+        carrier activation, or subscription credentials are emulated.
+      lpac:
+        enabled: false
+        status: not_a_hardware_replacement
+    gpu_ran:
+      implementation: nvidia_aerial
+      enabled: false
+      status: not_integrated
+      limitation: >-
+        Aerial cuPHY/cuMAC execution requires a supported NVIDIA GPU and
+        compatible software stack. No GPU availability is established for
+        the current VPS. Do not claim Aerial runtime execution.
+  safety:
+    handset_must_not_access:
+      - raw_modem_interfaces
+      - AT_command_interfaces
+      - direct_RIL_control
+      - mmcli
+      - lpac
+      - srsue
+    telemetry_contract:
+      synthetic_source_label_required: true
+      prohibit_synthetic_as_carrier_truth: true
+    policy_fail_closed: true
+    baseline_on_stale_telemetry: true
+  validation:
+    executable_baseline:
+      command: python -m pytest tests/ -q
+      working_directory: radio/fapo-ran
+      expected_scope: existing_fapo_tests
+    targets_not_yet_verified:
+      - 5ms_policy_latency
+      - spectral_efficiency_bps_hz
+      - mimo_gap_closure
+      - twin_to_radio_agreement
+      - aerial_l1_latency
+      - aerial_l2_latency
+      - ru_fidelity
+      - complete_hardware_replacement_coverage
+    rule: >-
+      A target becomes verified only when a reproducible test, measured
+      output, environment details, and input artifact hashes are committed.
+  transport:
+    phone_to_vps: rustunnel
+    endpoint: "tcp://vps:9100"
+    status: planned
+    note: >-
+      Endpoint is a deployment placeholder, not a live listener or verified
+      Rustunnel route. Bind and authenticate it before use.
+  rollback:
+    strategy: disable_profile_and_return_to_existing_fapo_twin
+    artifact: null
+    note: No rollback archive is asserted to exist.
