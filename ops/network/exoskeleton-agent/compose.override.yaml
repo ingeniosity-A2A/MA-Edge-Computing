@@ -1,0 +1,64 @@
+# ============================================================================
+# Edge Computing/ops/network/exoskeleton-agent/compose.override.yaml
+# ============================================================================
+# Networking for the Exoskeleton headless GitHub CLI Agent.
+#
+# Moved here from the Exoskeleton repository: the agent process itself is
+# network-free (loopback only, no published port, no custom network). All
+# topology — bridge network, Kiri domains, published ports, the nginx
+# dashboard — is owned by this repository, next to the rest of ops/network
+# (Tailscale install, edge preflight, grants).
+#
+# Apply it on top of the Exoskeleton compose file, with the Exoskeleton
+# checkout as the project directory so ./INDEX.md and ./Dependencies resolve
+# there:
+#
+#   export EXOSKELETON_DIR=/path/to/Exoskeleton
+#   export GH_TOKEN=...
+#   docker compose \
+#     --project-directory "$EXOSKELETON_DIR" \
+#     -f "$EXOSKELETON_DIR/compose.yaml" \
+#     -f ops/network/exoskeleton-agent/compose.override.yaml \
+#     up -d
+#
+# On Kiri (Docker Engine API compatible) services answer at
+# <service>.<project>.kiri.local:
+#   http://agent.exoskeleton.kiri.local       (/health, /status, /audit)
+#   http://dashboard.exoskeleton.kiri.local   (rendered INDEX.md)
+# ============================================================================
+
+services:
+
+  # ── Agent networking ──────────────────────────────────────────────────
+  # The base file publishes nothing; this is where it becomes reachable.
+  agent:
+    networks:
+      - exoskeleton
+    labels:
+      dev.kiri.domain: agent.exoskeleton    # → http://agent.exoskeleton.kiri.local
+    ports:
+      - "9090:9090"                  # Agent health/status endpoint
+
+  # ── Monitoring Dashboard ──────────────────────────────────────────────
+  # Serves the rendered INDEX.md (and the dependency directory listing).
+  dashboard:
+    image: nginx:alpine
+    container_name: exoskeleton-dashboard
+    restart: unless-stopped
+    networks:
+      - exoskeleton
+    labels:
+      dev.kiri.domain: dashboard.exoskeleton  # → http://dashboard.exoskeleton.kiri.local
+    ports:
+      - "8080:80"
+    volumes:
+      # Relative to --project-directory (the Exoskeleton checkout).
+      - ./INDEX.md:/usr/share/nginx/html/index.html:ro
+      - ./Dependencies:/usr/share/nginx/html/deps:ro
+    depends_on:
+      agent:
+        condition: service_healthy
+
+networks:
+  exoskeleton:
+    driver: bridge
