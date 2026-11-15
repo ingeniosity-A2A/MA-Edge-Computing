@@ -1,7 +1,0 @@
-[package]
-name = "air-ledger"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-air-core = { path = "../air-core" }

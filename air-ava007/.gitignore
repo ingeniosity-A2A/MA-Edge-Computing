@@ -1,4 +1,0 @@
-/target/
-/data/*.duckdb
-/data/*.duckdb.wal
-*.trace.jsonl

@@ -38,8 +38,6 @@ The supplied greater-than-100% 2028 spectral-efficiency claim is treated as a ve
 - LEANN: derived semantic index only. It does not replace authoritative source records or DuckDB.
 - Drex Max / Drex Search: external API boundary; require vendor terms, privacy/cost controls, and task evaluation.
 - TurboVecQuant: compression research; benchmark accuracy and reversibility before adoption.
-- air-consensus: distributed candidate mixing and digital aggregation; no general Quasi-Fejer proof or physical OTA-C.
-- air-dfm: governance scaffold only; no learned parametric DFM model.
 - DuckDB / atomic substrate: durable source of truth, subject to AVA-007 acceptance.
 - Rustunnel / Tailscale: transport, not decision authority.
 
@@ -49,7 +47,7 @@ LEANN index-size claims apply to the derived vector index, not original records.
 
 1. Establish reproducible Docling ingestion and provenance; benchmark source storage separately from LEANN.
 2. Test local model candidates on real device memory, thermals, latency, and task quality.
-3. Integrate air-coupling; add typed domain validators before treating numeric constraint diagnostics as semantic verification.
+3. Add typed domain validators before treating numeric constraint diagnostics as semantic verification.
 4. Add Drex behind an API adapter with timeout, privacy, cost, and vendor-license controls.
 5. Evaluate remote specialists by pinned revision and task suite; verify license and hardware.
 6. Integrate Aerial only on a supported NVIDIA GPU/CUDA stack; otherwise retain the disabled research profile.
@@ -57,6 +55,6 @@ LEANN index-size claims apply to the derived vector index, not original records.
 
 ## Verification status
 
-The crate includes tests for weighted consensus, disagreement, dimension mismatch, zero total weight, invalid numeric input, and registry state. They are committed but not claimed executed until Cargo output is captured using the pinned toolchain.
+The coupling crate and its tests (weighted consensus, disagreement, dimension mismatch, zero total weight, invalid numeric input, registry state) have been removed. No executed test output is claimed.
 
 No model weights were downloaded or merged. No Aerial runtime was installed. No GPU latency, spectral-efficiency gain, 64T64R result, 64 MB index, or local-model benchmark is claimed.

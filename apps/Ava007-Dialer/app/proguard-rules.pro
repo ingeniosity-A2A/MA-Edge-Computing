@@ -1,3 +1,0 @@
--keep class com.telnyx.webrtc.** { *; }
--keep class com.telnyx.webrtc.lib.** { *; }
--dontwarn com.telnyx.**

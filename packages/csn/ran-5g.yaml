@@ -1,4 +1,4 @@
-# MA Edge Computing — hardware-free RAN profile
+# Edge Computing — hardware-free RAN profile
 # Declarative profile; the in-process FAPO twin is the executable baseline.
 apiVersion: "v1"
 kind: RANProfile
@@ -16,7 +16,7 @@ spec:
     hardware_mode: software_only
     default_adapter: in_process_digital_twin
     command:
-      working_directory: radio/fapo-ran
+      working_directory: Sensory-Nodes/RadioNode
       argv: [python, bootstrap.py, --twin, --period, "1.0"]
     control_period_seconds: 1.0
     timing:
@@ -32,18 +32,18 @@ spec:
     reject_unlabelled_hardware_claims: true
   policy:
     optimizer: FAPO_LDPTRLQ
-    implementation: radio/fapo-ran/ran_capability/fapo.py
-    safety_envelope: radio/fapo-ran/ran_capability/safety.py
-    adapter: radio/fapo-ran/ran_capability/srsran/twin.py
+    implementation: Sensory-Nodes/RadioNode/ran_capability/fapo.py
+    safety_envelope: Sensory-Nodes/RadioNode/ran_capability/safety.py
+    adapter: Sensory-Nodes/RadioNode/ran_capability/srsran/twin.py
     authority: vps
     handset_policy_role: consume_only
   intelligence:
     coupling_engine:
-      crate: air-ava007/crates/air-coupling
+      crate: null
       profile: "24/16"
       input_slots: 24
       shared_state_dimensions: 16
-      status: source_committed_tests_not_run
+      status: removed
       authority: ava007
       output: advisory_candidate_state
       weight_merging: false
@@ -96,8 +96,7 @@ spec:
     policy_fail_closed: true
     baseline_on_stale_telemetry: true
   validation:
-    executable_baseline: {command: "python -m pytest tests/ -q", working_directory: radio/fapo-ran, expected_scope: existing_fapo_tests}
-    coupling: {command: "cargo test -p air-coupling", working_directory: air-ava007, status: not_run}
+    executable_baseline: {command: "python -m pytest tests/ -q", working_directory: Sensory-Nodes/RadioNode, expected_scope: existing_fapo_tests}
     targets_not_yet_verified: [5ms_policy_latency, spectral_efficiency_bps_hz, mimo_gap_closure, twin_to_radio_agreement, aerial_l1_latency, aerial_l2_latency, ru_fidelity, complete_hardware_replacement_coverage, local_model_task_quality, 64mb_derived_index]
     rule: >-
       Verification requires reproducible test output, environment details,

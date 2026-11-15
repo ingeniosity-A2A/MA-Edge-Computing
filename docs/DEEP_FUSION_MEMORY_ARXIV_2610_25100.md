@@ -11,7 +11,8 @@ for novel or unsupported contexts. The substrate remains the source of truth.
 
 ## What this commit implements
 
-The `air-dfm` Rust crate implements a bounded governance scaffold:
+The DFM governance scaffold previously implemented in a now-removed crate
+covered:
 
 - candidate validation (identity, finite embeddings, score range);
 - quality and temporal-context-depth promotion gates;
@@ -48,14 +49,9 @@ future integration work.
 
 ## Verification
 
-From `air-ava007/`:
+No executable verification is available: the workspace that carried these tests
+has been removed.
 
-```sh
-cargo fmt --all -- --check
-cargo test --workspace --all-targets
-cargo clippy --workspace --all-targets -- -D warnings
-```
-
-Crate tests cover local validation and promotion decisions only. They do not
+The former crate tests covered local validation and promotion decisions only. They do not
 validate DFM paper results, model quality, hidden-state fusion, training,
 latency, or end-to-end Exoskeleton persistence.

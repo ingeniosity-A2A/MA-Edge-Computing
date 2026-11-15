@@ -10,8 +10,8 @@ metadata:
 spec:
   source: "arXiv:2610.25100"
   implementation:
-    crate: "air-ava007/crates/air-dfm"
-    status: governance_scaffold_only
+    crate: null
+    status: removed
     learned_causal_predictor: not_implemented
     gated_cross_attention: not_implemented
     parametric_inference: not_implemented
@@ -32,9 +32,9 @@ spec:
     duplicate_similarity: 0.85
     operations: [ADD, UPDATE, DELETE, NOOP]
     note: >-
-      Current crate implements candidate validation, ADD/UPDATE/NOOP decisions,
-      and an in-memory registry only. DELETE, durable substrate transactions,
-      and model-weight promotion remain unimplemented.
+      The removed crate implemented candidate validation, ADD/UPDATE/NOOP
+      decisions, and an in-memory registry only. DELETE, durable substrate
+      transactions, and model-weight promotion remain unimplemented.
   inference:
     fast_path: unavailable_until_learned_model_is_integrated
     fallback: dream_rsi_retrieval

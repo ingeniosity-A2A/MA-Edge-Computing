@@ -14,11 +14,12 @@ it does not authorize actions or promote observations into Source Truth.
 
 ## Integrated in this commit
 
-The air-consensus crate provides a bounded superiorization-inspired candidate
-selector, a validated local weighted-mixing step, packet-level digital
-telemetry aggregation (weighted mean/min/max/generation), and unit tests.
-These are primitives, not a reproduction of the paper's full distributed
-algorithm, OTA-C protocol, or convergence proof.
+The former coordination crate (since removed) provided a bounded
+superiorization-inspired candidate selector, a validated local weighted-mixing
+step, packet-level digital telemetry aggregation (weighted
+mean/min/max/generation), and unit tests. These were primitives, not a
+reproduction of the paper's full distributed algorithm, OTA-C protocol, or
+convergence proof.
 
 ## Mathematical and systems boundaries
 
@@ -58,10 +59,9 @@ algorithm, OTA-C protocol, or convergence proof.
 
 ## Verification
 
-Run from air-ava007/: cargo fmt --all -- --check;
-cargo test --workspace --all-targets; cargo clippy --workspace --all-targets
--- -D warnings.
+No executable verification is available: the workspace that carried these
+tests has been removed.
 
-Crate tests validate local primitives only. They do not validate the paper's
+The former crate tests validated local primitives only. They do not validate the paper's
 convergence theorem, OTA-C, Rustunnel mesh behavior, live RAN safety, or
 production performance.

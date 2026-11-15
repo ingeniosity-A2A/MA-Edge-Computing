@@ -28,10 +28,9 @@ The phone's cellular connection is the upstream network. Tailscale supplies encr
 
 ## 1. Existing repository components
 
-- `apps/Tailscale-Android-SDK/` builds the upstream Tailscale Android project and produces `libtailscale.aar` plus a debug APK. The build script uses upstream source rather than a divergent fork.
-- `apps/TailSocks/` documents a usable Android client path for the S26 Ultra, including Proxy and VPN/TUN modes.
-- `apps/Ava007-GenieX/` is a separate on-device inference integration. Do not mix its Gradle dependencies into the Tailscale SDK project.
-- The SDK AAR build is not equivalent to embedding a working node in Ava007's app. The host app still needs an explicit integration, Android VPN/user-consent handling, node state lifecycle, and on-device tests.
+No Android app or SDK build projects are present in this repository; the former app directories have been removed. The connectivity boundaries below still apply to any node you build in `Sensory-Nodes/`.
+
+An SDK AAR build is not equivalent to embedding a working node in an app. The host app still needs an explicit integration, Android VPN/user-consent handling, node state lifecycle, and on-device tests.
 
 ### S26 inference runtime boundary
 
