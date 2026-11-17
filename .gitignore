@@ -1,3 +1,4 @@
 
 # Local clone of the separate Exoskeleton project (cross-repo work only)
 /src-exoskeleton/
+__pycache__/
