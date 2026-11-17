@@ -1,0 +1,31 @@
+[Unit]
+Description=tsbot Tailscale watchdog (MiMo agent, reversible repairs only)
+Documentation=https://github.com/ingeniosity-A2A/MA-Edge-Computing/blob/main/ops/network/tsbot/README.md
+After=network-online.target tailscaled.service
+Wants=network-online.target
+Requires=tailscaled.service
+
+[Service]
+Type=simple
+# Secrets live in this file, owned root:root mode 0600, never in the unit.
+#   OPENROUTER_API=sk-or-...
+#   TS_MODEL=xiaomi/mimo-v2.6-pro
+EnvironmentFile=/etc/tsbot/tsbot.env
+ExecStart=/usr/local/bin/tsbot --daemon
+StateDirectory=tsbot
+Restart=always
+RestartSec=5
+# tailscale CLI talks to tailscaled over its unix socket and reads root-owned
+# state, so this runs as root; what it may execute is bounded by the allowlist
+# in tsbot.py, not by the user it runs as.
+User=root
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/tsbot /var/log
+# The daemon legitimately talks to tailscaled, the control plane, and the API.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
