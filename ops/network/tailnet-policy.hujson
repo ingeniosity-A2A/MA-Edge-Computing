@@ -1,0 +1,73 @@
+// Tailnet policy for the edge estate: MA-Edge-Computing/ops/network.
+//
+// Replaces the previous {"src":["*"],"dst":["*"],"ip":["*"]} wildcard, which
+// denied nothing. Grants are deny-by-default and additive: every rule below is
+// the *only* reason the named flow works, and no rule can narrow another.
+//
+// Selectors are pinned to the tailnet addresses recorded in this directory's
+// runbooks (rustunnel README host table, tsbot README). Host aliases are used
+// instead of tags on purpose: tagging a device changes its identity and needs a
+// re-auth with --advertise-tags, so a policy that used tag: selectors could lock
+// the operator out the moment it is saved. Once the devices carry tags, swap the
+// hosts for tags and drop this block.
+//
+// Before saving: every alias below must match the live tailnet. `tailscale
+// status` on the VPS prints the peers; the admin console shows the same. A
+// policy that is wrong here removes access rather than adding it.
+{
+  "hosts": {
+    "vps": "100.91.36.108", // vps-73b462c2, exit node allowed, serves rustunnel
+    "s26-ultra": "100.121.129.77", // brianqs-s26-ultra-1, rustunnel client
+    "aperture": "100.75.232.23" // aperture, exit node not allowed
+  },
+
+  "grants": [
+    // Operator shell on the VPS. The only administrative path that is granted;
+    // nothing else opens tcp:22 anywhere.
+    {
+      "src": ["autogroup:admin"],
+      "dst": ["vps"],
+      "ip": ["tcp:22"]
+    },
+
+    // rustunnel control plane, variant A: the phone dials the VPS control port
+    // and nothing else reaches it. 4040 is the WebSocket control port; it is
+    // never opened to the internet, and this grant is the only tailnet path.
+    {
+      "src": ["s26-ultra"],
+      "dst": ["vps"],
+      "ip": ["tcp:4040"]
+    },
+
+    // rustunnel TCP tunnels, variant A: the allocated ports 20000-20050 are
+    // reachable by tailnet members. Narrow this to the one device that consumes
+    // them once the target service is decided (the runbook still lists that as
+    // an open decision).
+    {
+      "src": ["autogroup:member"],
+      "dst": ["vps"],
+      "ip": ["tcp:20000-20050"]
+    },
+
+    // The phone may use the VPS as its exit node. Without `via`, every device
+    // advertising an exit node is offered; today only the VPS advertises one
+    // (aperture is recorded as exit-node-not-allowed), so `via` would add no
+    // restriction. Add it once a second exit node exists.
+    {
+      "src": ["s26-ultra"],
+      "dst": ["autogroup:internet"],
+      "ip": ["*"]
+    }
+
+    // Deliberately absent:
+    //   - rustunnel dashboard 8443 and metrics 9090: loopback only, reached by
+    //     `ssh -L`, so they need no tailnet grant and must not get one.
+    //   - PostgreSQL 5432: local to the VPS.
+    //   - aperture: no flow is recorded for it yet, so it gets no grant and no
+    //     capability. Deny-by-default is the correct answer until the runbook
+    //     names what it is for.
+    //   - Termux SSH 8022 through rustunnel: a remote-shell exposure decision,
+    //     not a convenience, per the rustunnel README gate 5. It is not granted
+    //     here even as a tunnel port.
+  ]
+}

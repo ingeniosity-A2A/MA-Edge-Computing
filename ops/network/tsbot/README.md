@@ -104,8 +104,9 @@ treats an unparseable `status --json` as "not observable" and proposes `tailscal
 ## Doctrine
 
 - A tailnet identity is not an authorization: `tailscale set` changes this device's preferences,
-  and nothing here writes the ACL policy — `tailscale-grants.json` in this directory is still a
-  wildcard grant, and this tool does not fix that.
+  and nothing here writes the ACL policy. The policy lives in
+  [`../tailnet-policy.hujson`](../tailnet-policy.hujson); `tsbot` reads it only through the
+  access it already has.
 - No public exposure: no `serve`, `funnel` or `cert` in the allowlist.
 - Repairs are reversible and recorded with their undo. Anything that is not reversible is a
   proposal in the log, for the operator.
