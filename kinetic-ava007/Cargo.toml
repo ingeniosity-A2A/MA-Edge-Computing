@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/kinetic-core",
+    "crates/kinetic-index",
+    "crates/kinetic-ledger",
+    "crates/kinetic-gate",
+    "crates/kinetic-consensus",
+    "crates/kinetic-dfm",
+    "crates/kice",
+]

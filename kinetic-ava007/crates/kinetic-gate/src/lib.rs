@@ -2,8 +2,8 @@
 //! Production BM25/RRF/SPR implementations require real corpus fixtures and
 //! recorded recall tests; no candidate is promoted solely by a confidence label.
 
-use air_core::verdict::Verdict;
-use air_index::Candidate;
+use kinetic_core::verdict::Verdict;
+use kinetic_index::Candidate;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PromotionDecision {

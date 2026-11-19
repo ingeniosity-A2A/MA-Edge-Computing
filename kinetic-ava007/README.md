@@ -1,6 +1,6 @@
-# Air-Ava007
+# Kinetic-Ava007
 
-Air-Ava007 is the Rust-native execution and evidence substrate owned by **MA-Edge-Computing**. It is the execution substrate for the Kinetic Intelligence Coupling Engine (KICE) — the model-independent intelligence coordination and evaluation capability — not a new AI model and not a quantum computer.
+Kinetic-Ava007 is the Rust-native execution and evidence substrate owned by **MA-Edge-Computing**. It is the execution substrate for the Kinetic Intelligence Coupling Engine (KICE) — the model-independent intelligence coordination and evaluation capability — not a new AI model and not a quantum computer.
 
 ## Architectural contract
 
@@ -13,10 +13,10 @@ Air-Ava007 is the Rust-native execution and evidence substrate owned by **MA-Edg
 
 ## Workspace
 
-- `crates/air-core`: canonical memory records, source provenance, verdict contracts.
-- `crates/air-index`: vector-index contract and adapter boundary.
-- `crates/air-ledger`: append-only evidence-ledger contract and DuckDB adapter boundary.
-- `crates/air-gate`: Rev.ike BM25/RRF/SPR promotion and verification gates.
+- `crates/kinetic-core`: canonical memory records, source provenance, verdict contracts.
+- `crates/kinetic-index`: vector-index contract and adapter boundary.
+- `crates/kinetic-ledger`: append-only evidence-ledger contract and DuckDB adapter boundary.
+- `crates/kinetic-gate`: Rev.ike BM25/RRF/SPR promotion and verification gates.
 
 No placeholder implementation is represented as measured or production-ready. DuckDB, TurboVec, TurboQuant, and GSAP adapters must be pinned and verified against the actual upstream versions before the full workspace is declared green.
 

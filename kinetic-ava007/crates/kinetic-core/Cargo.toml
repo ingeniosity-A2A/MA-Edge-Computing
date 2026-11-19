@@ -1,5 +1,5 @@
 [package]
-name = "air-core"
+name = "kinetic-core"
 version = "0.1.0"
 edition = "2021"
 

@@ -15,9 +15,9 @@ test:
 	cargo test --workspace --all-targets -- --nocapture
 
 audit:
-	@test -x target/release/air-audit || (echo "BLOCKED: air-audit binary not implemented/built yet"; exit 2)
+	@test -x target/release/kinetic-audit || (echo "BLOCKED: kinetic-audit binary not implemented/built yet"; exit 2)
 	@test -f ./data/ledger.duckdb || (echo "BLOCKED: local evidence ledger missing"; exit 2)
-	./target/release/air-audit --ledger ./data/ledger.duckdb --tolerance 0.02 --sample 1000
+	./target/release/kinetic-audit --ledger ./data/ledger.duckdb --tolerance 0.02 --sample 1000
 
 verify: fmt-check lint test audit
-	@echo "VERIFY PASSED: all Air-Ava007 gates passed under Rust $(RUST_VERSION)"
+	@echo "VERIFY PASSED: all Kinetic-Ava007 gates passed under Rust $(RUST_VERSION)"

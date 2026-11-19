@@ -1,4 +1,4 @@
-# Air-Ava007 — Architecture and Evidence Contract
+# Kinetic-Ava007 — Architecture and Evidence Contract
 
 ## 11. Position Statement — Ava-007 Architecture Team (Preserved Verbatim from Addendum v1.4)
 
@@ -14,17 +14,17 @@ The two most important verification gates — C2's device sweep and C3's real-co
 ## 13. System Blueprint & Verified Codebase Layout
 
 ```text
-air-ava007/
+kinetic-ava007/
 ├── Makefile
 ├── README.md
 ├── WHITEPAPER.md
 ├── rust-toolchain.toml
 ├── Cargo.toml
 └── crates/
-    ├── air-core/
-    ├── air-index/
-    ├── air-ledger/
-    └── air-gate/
+    ├── kinetic-core/
+    ├── kinetic-index/
+    ├── kinetic-ledger/
+    └── kinetic-gate/
 ```
 
 ### 13.1 Pinned Toolchain
@@ -33,11 +33,11 @@ The requested Rust toolchain is pinned in `rust-toolchain.toml` to `1.99.1`. Too
 
 ### 13.2 Canonical Memory Record
 
-`crates/air-core/src/lib.rs` defines a serde-serializable record with source span provenance. The layout is a logical Rust data contract; it is **not** a claim of fixed-width in-memory representation or ABI compatibility. FFI must use an explicit, versioned serialization boundary.
+`crates/kinetic-core/src/lib.rs` defines a serde-serializable record with source span provenance. The layout is a logical Rust data contract; it is **not** a claim of fixed-width in-memory representation or ABI compatibility. FFI must use an explicit, versioned serialization boundary.
 
 ### 13.3 Verification Verdict
 
-`crates/air-core/src/verdict.rs` records strict success, bounded partial credit, failed-share ratio, and quantization distortion. The distortion threshold is a configured policy constant, not a universal mathematical floor. The gate must report the measured distortion and threshold separately.
+`crates/kinetic-core/src/verdict.rs` records strict success, bounded partial credit, failed-share ratio, and quantization distortion. The distortion threshold is a configured policy constant, not a universal mathematical floor. The gate must report the measured distortion and threshold separately.
 
 ## 14. Verification & Build Engine
 
@@ -45,9 +45,9 @@ The Makefile exposes format, lint, test, audit, and verify targets. The audit ta
 
 ## Migration and ownership
 
-- This Rust workspace belongs in `ingeniosity-A2A/MA-Edge-Computing/air-ava007`.
+- This Rust workspace belongs in `ingeniosity-A2A/MA-Edge-Computing/kinetic-ava007`.
 - A2A-Exoskeleton is retiring; do not add new runtime implementation there.
-- GSAP's scheduling and lifecycle contract is preserved in Air-Ava007; it is not reduced to animation/interpolation.
+- GSAP's scheduling and lifecycle contract is preserved in Kinetic-Ava007; it is not reduced to animation/interpolation.
 - Intellect and candidate reasoning remain owned by Cybernetic-Ava007.
 - Device, RF, Android, and edge runtime integration remain owned by MA-Edge-Computing.
 - Omni-OS remains the system integration/environment surface.

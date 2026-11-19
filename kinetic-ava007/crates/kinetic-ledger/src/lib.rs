@@ -2,7 +2,7 @@
 //! bindings are deliberately not fabricated; add them after validating the
 //! selected DuckDB crate/API and runtime ABI.
 
-use air_core::MemoryRecord;
+use kinetic_core::MemoryRecord;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerError(pub String);
