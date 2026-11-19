@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/air-core",
+    "crates/air-index",
+    "crates/air-ledger",
+    "crates/air-gate",
+    "crates/air-consensus",
+    "crates/air-dfm",
+    "crates/air-coupling",
+]
