@@ -98,8 +98,52 @@ def log(level: str, message: str, **fields) -> dict:
     return record
 
 
+def valid_node(value: str) -> bool:
+    return isinstance(value, str) and bool(NODE_RE.fullmatch(value))
+
+
 def allowed(argv: list[str]) -> bool:
-    return any(tuple(argv[: len(rule)]) == rule for rule in ALLOWED)
+    """Match complete, explicitly supported Tailscale argv shapes.
+
+    Parameterized flags are validated here as well as at their tool boundary;
+    subprocess receives an argv array, never a shell command string.
+    """
+    exact = {
+        ("status", "--json"),
+        ("status",),
+        ("netcheck", "--format=json"),
+        ("netcheck",),
+        ("ip", "-4"),
+        ("ip",),
+        ("version",),
+        ("dns", "status", "--json"),
+        ("set", "--exit-node="),
+    }
+    command = tuple(argv)
+    if command in exact:
+        return True
+
+    if len(argv) == 2 and argv[0] == "set":
+        flag = argv[1]
+        if flag.startswith("--exit-node="):
+            target = flag.split("=", 1)[1]
+            return not target or valid_node(target)
+        if flag in {
+            "--accept-routes=true", "--accept-routes=false",
+            "--advertise-exit-node=true", "--advertise-exit-node=false",
+            "--shields-up=true", "--shields-up=false",
+        }:
+            return True
+
+    if len(argv) == 6 and argv[0:5] == [
+        "ping", "--until-direct=false", "-c", "2", "--timeout=3s"
+    ]:
+        return valid_node(argv[5])
+    if len(argv) == 5 and argv[0:4] == [
+        "ping", "-c", "3", "--timeout=3s"
+    ]:
+        return valid_node(argv[4])
+    return False
 
 
 def run_ts(args: list[str], timeout: int = 15) -> dict:
@@ -307,7 +351,7 @@ def tool_netcheck() -> str:
 
 
 def tool_ping(node: str = "") -> str:
-    if not isinstance(node, str) or not (NODE_RE.fullmatch(node) or node.startswith("100.")):
+    if not valid_node(node):
         return "refused: node must be a hostname or a 100.x.y.z address"
     result = run_ts(["ping", "-c", "3", "--timeout=3s", node], timeout=30)
     # Name the node that was pinged: relayed pongs print the peer's own address,
@@ -321,7 +365,7 @@ def tool_route(node: str = "") -> str:
     if node.lower() in {"none", "off", "clear", "disable"}:
         result = clear_exit_node()
         return f"exit {result['code']}: exit node cleared (undo: set --exit-node=<previous>)\n{clip(result['err'], 200)}"
-    if not (NODE_RE.fullmatch(node) or node.startswith("100.")):
+    if not valid_node(node):
         return "refused: node must be a hostname or a 100.x.y.z address"
     result = run_ts(["set", f"--exit-node={node}"], timeout=25)
     return f"exit {result['code']}: routed through {node} (undo: set --exit-node=)\n{clip(result['err'], 200)}"
