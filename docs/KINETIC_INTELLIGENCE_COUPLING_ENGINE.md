@@ -92,7 +92,7 @@ KICE is therefore not the brain. It is a coordination capability that helps the 
 
 ## The actual implementation status
 
-The recovered `air-coupling` implementation establishes a real starting point: weighted consensus, pairwise L2 disagreement measurement, cross-domain constraint proxies, weakest-contributor confidence capping, provenance handling, typed errors, and a candidate registry.
+The recovered `kice` implementation establishes a real starting point: weighted consensus, pairwise L2 disagreement measurement, cross-domain constraint proxies, weakest-contributor confidence capping, provenance handling, typed errors, and a candidate registry.
 
 However, the recovered candidate registry marks its entries as untested. The recovered implementation does not, by itself, establish a complete recurrent kinetic system, independently verified model diversity, superior reasoning accuracy, or production-grade fault tolerance.
 
@@ -133,7 +133,7 @@ That is the benchmark that would establish its significance — not a claim that
 
 ### Naming convention
 
-Standardize the name as **Kinetic Intelligence Coupling Engine (KICE)**. Replace "Air-LLM" throughout system documentation and interfaces. Reserve "Kinetic Intelligence System" for the larger architecture that uses KICE. The `air-coupling` crate is the KICE implementation within the Ava-007 / Exoskeleton architecture.
+Standardize the name as **Kinetic Intelligence Coupling Engine (KICE)**. Replace "Air-LLM" throughout system documentation and interfaces. Reserve "Kinetic Intelligence System" for the larger architecture that uses KICE. The `kice` crate is the KICE implementation within the Ava-007 / Exoskeleton architecture.
 
 ## Research references
 
