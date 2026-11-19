@@ -52,6 +52,7 @@ STATE_DIR = Path(os.getenv("TS_STATE_DIR", "/var/lib/tsbot"))
 DRY_RUN = os.getenv("TS_DRY_RUN") == "1"
 MAX_ROUNDS = int(os.getenv("TS_MAX_ROUNDS", "6"))
 FAILURES_BEFORE_REPAIR = 2
+WATCH_PEERS = [peer.strip() for peer in os.getenv("TS_WATCH_PEERS", "").split(",") if peer.strip()]
 
 # Everything the agent is allowed to execute. `up`, `down`, `logout`, `login`,
 # `serve`, `funnel`, `cert` and `debug` are absent on purpose: no path in this
@@ -139,10 +140,6 @@ def allowed(argv: list[str]) -> bool:
         "ping", "--until-direct=false", "-c", "2", "--timeout=3s"
     ]:
         return valid_node(argv[5])
-    if len(argv) == 5 and argv[0:4] == [
-        "ping", "-c", "3", "--timeout=3s"
-    ]:
-        return valid_node(argv[4])
     return False
 
 
@@ -199,16 +196,18 @@ def diagnose() -> dict:
     }
 
 
-def probe_exit_node(node: dict) -> dict:
-    """Reach the exit node over Tailscale, without requiring a direct path.
+def probe_peer(peer: str) -> dict:
+    """Test Tailscale reachability, accepting either direct or DERP transport."""
+    if not valid_node(peer):
+        return {"ok": False, "detail": "invalid peer hostname or Tailscale IPv4 address"}
+    result = run_ts(["ping", "--until-direct=false", "-c", "2", "--timeout=3s", peer], timeout=25)
+    return {"ok": result["code"] == 0, "detail": clip(f"peer {peer} exit {result['code']}: {result['out'] or result['err']}", 400)}
 
-    `--until-direct=false` matters: it defaults to true, and with it a healthy
-    node reached through DERP exits non-zero, which would look like an outage.
-    """
+
+def probe_exit_node(node: dict) -> dict:
     if not node.get("ips"):
         return {"ok": False, "detail": "exit node has no Tailscale IP in status"}
-    result = run_ts(["ping", "--until-direct=false", "-c", "2", "--timeout=3s", node["ips"][0]], timeout=25)
-    return {"ok": result["code"] == 0, "detail": clip(f"exit {result['code']}: {result['out'] or result['err']}", 400)}
+    return probe_peer(node["ips"][0])
 
 
 def clear_exit_node() -> dict:
@@ -243,6 +242,11 @@ def daemon_cycle(state: dict) -> None:
             auth_url=health["auth_url"],
             proposal="operator: sudo tailscale up (auth keys are not handled by this daemon)")
         return
+
+    for peer in WATCH_PEERS:
+        probe = probe_peer(peer)
+        log("info" if probe["ok"] else "warn", "watched peer reachability",
+            peer=peer, reachable=probe["ok"], detail=probe["detail"])
 
     node = health.get("exit_node")
     if not node:
@@ -353,7 +357,7 @@ def tool_netcheck() -> str:
 def tool_ping(node: str = "") -> str:
     if not valid_node(node):
         return "refused: node must be a hostname or a 100.x.y.z address"
-    result = run_ts(["ping", "-c", "3", "--timeout=3s", node], timeout=30)
+    result = run_ts(["ping", "--until-direct=false", "-c", "2", "--timeout=3s", node], timeout=25)
     # Name the node that was pinged: relayed pongs print the peer's own address,
     # and without this the answer can be attributed to the wrong device.
     return clip(f"pinged {node}\nexit {result['code']}\n{result['out'] or result['err']}", 1200)
