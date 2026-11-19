@@ -355,7 +355,7 @@ READ_ONLY_CLI_ROOTS = {"status", "netcheck", "ip", "version", "ping", "whois", "
 def tool_tailscale_cli(argv: list[str]) -> str:
     """General native CLI bridge; mutations require an operator at the VPS terminal."""
     if not isinstance(argv, list) or not argv or any(
-        not isinstance(part, str) or not part or "\\x00" in part for part in argv
+        not isinstance(part, str) or not part or "\x00" in part for part in argv
     ):
         return "refused: argv must be a non-empty array of non-empty strings"
     if argv[0] == "dns" and len(argv) >= 2 and argv[1] == "status":
@@ -366,7 +366,7 @@ def tool_tailscale_cli(argv: list[str]) -> str:
         if not sys.stdin.isatty():
             return "approval required: this command changes Tailscale state; rerun tsbot interactively on the VPS terminal to review and approve it"
         command = ["tailscale", *argv]
-        print("\\nTailscale command requires operator approval:", file=sys.stderr)
+        print("\nTailscale command requires operator approval:", file=sys.stderr)
         print("  " + " ".join(repr(x) for x in command), file=sys.stderr)
         try:
             answer = input("Execute this exact command? Type YES to proceed: ").strip()
@@ -382,8 +382,8 @@ def tool_tailscale_cli(argv: list[str]) -> str:
             [binary, *argv], capture_output=True, text=True, timeout=120, check=False
         )
         return clip(
-            f"$ tailscale {' '.join(argv)}\\nexit_code={done.returncode}\\n"
-            f"stdout:\\n{done.stdout}\\nstderr:\\n{done.stderr}", 6000
+            f"$ tailscale {' '.join(argv)}\nexit_code={done.returncode}\n"
+            f"stdout:\n{done.stdout}\nstderr:\n{done.stderr}", 6000
         )
     except subprocess.TimeoutExpired:
         return "tailscale command timed out after 120 seconds"
