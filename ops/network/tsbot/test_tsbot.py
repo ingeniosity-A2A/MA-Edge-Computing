@@ -125,7 +125,7 @@ class GeneralCliBridgeTests(unittest.TestCase):
 
     @patch("tsbot.subprocess.run")
     @patch("tsbot.sys.stdin", new=type("TTY", (), {"isatty": lambda self: False})())
-    def test_mutating_command_refused_without_terminal(self, _tty, mocked_run):
+    def test_mutating_command_refused_without_terminal(self, mocked_run):
         result = tsbot.tool_tailscale_cli(["set", "--exit-node="])
         self.assertIn("approval required", result)
         mocked_run.assert_not_called()
