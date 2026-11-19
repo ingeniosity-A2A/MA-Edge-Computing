@@ -65,19 +65,27 @@ inline in the systemd unit. Four of those do not hold up:
 | Errors swallowed into a log file | JSON lines to stdout (journal) plus optional `TS_LOG`; an unwritable log is reported, not hidden | Measurement stays separate from the report |
 | `manage_exit_node` / `configure_node` free-form | Each tool builds its own argv from validated parameters, then the argv is checked against the allowlist again | Two independent checks, and `--exit-node=` gets a hostname or `100.x` address, never a stable node id |
 
-## Allowlist
+## Interactive native CLI bridge and watchdog boundary
 
-The command boundary allows the exact read-only probes plus validated parameterized `ping` and `set` forms:
+The natural-language operator agent exposes `tailscale_cli(argv)`: it can invoke the
+installed native `tailscale` executable with an argument array, without a shell and without
+a hand-maintained subcommand allowlist. Read-only roots (status, netcheck, ip, version, ping,
+whois, metrics, licenses, and DNS status) run directly. **Every other command is treated as
+state-changing and requires the VPS terminal operator to type the exact confirmation word
+`YES`** after reviewing the rendered command. If tsbot has no interactive terminal, the
+operation is refused and must be rerun interactively. The model cannot approve its own action.
 
-```
-status --json · status · netcheck --format=json · netcheck · ip -4 · ip · version
-dns status --json · ping --until-direct=false -c 2 --timeout=3s <validated-node>
-set --exit-node=<empty-or-validated-node>
-set --accept-routes=true|false · set --advertise-exit-node=true|false · set --shields-up=true|false
-```
+This makes the full installed CLI surface available while keeping an explicit human approval
+boundary around mutations. The executable is resolved from PATH and invoked as an argv array;
+shell syntax, pipelines, redirects, and arbitrary programs are not accepted. Tailscale CLI
+operations do not grant authority beyond the local daemon's permissions or the tailnet's
+grants. This agent does not edit tailnet grants or policy; policy administration remains
+separate.
 
-Absent by design: `up`, `down`, `logout`, `login`, `serve`, `funnel`, `cert`, `ssh`, `debug`.
-The autonomous repair is exactly one of these: `set --exit-node=`.
+The unattended watchdog remains deliberately narrower. Its `ALLOWED` boundary permits only
+the exact probes and reversible local preference changes needed by its automatic recovery
+logic. It cannot use the interactive bridge, and it never autonomously runs `up`, `down`,
+`login`, `logout`, `serve`, or other operator commands.
 
 ## Install (VPS, systemd)
 
