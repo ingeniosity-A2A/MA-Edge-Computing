@@ -36,8 +36,18 @@ class AllowlistTests(unittest.TestCase):
             "ping", "--until-direct=false", "-c", "2", "--timeout=3s", "100.121.129.77"
         ]))
         self.assertTrue(tsbot.allowed([
-            "ping", "-c", "3", "--timeout=3s", "brianqs-s26-ultra-1"
+            "ping", "--until-direct=false", "-c", "2", "--timeout=3s", "brianqs-s26-ultra-1"
         ]))
+
+    @patch("tsbot.run_ts")
+    def test_peer_probe_accepts_derp_and_direct_paths(self, mocked_run):
+        mocked_run.return_value = {"code": 0, "out": "pong via DERP", "err": ""}
+        result = tsbot.probe_peer("100.121.129.77")
+        self.assertTrue(result["ok"])
+        mocked_run.assert_called_once_with(
+            ["ping", "--until-direct=false", "-c", "2", "--timeout=3s", "100.121.129.77"],
+            timeout=25,
+        )
 
     def test_connectivity_and_policy_commands_remain_forbidden(self):
         for argv in (
