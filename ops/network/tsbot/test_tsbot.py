@@ -112,9 +112,9 @@ class GeneralCliBridgeTests(unittest.TestCase):
     @patch("tsbot.shutil.which", return_value="/usr/bin/tailscale")
     @patch("tsbot.subprocess.run")
     @patch("builtins.input", return_value="YES")
-    @patch("sys.stdin.isatty", return_value=True)
+    @patch("tsbot.sys.stdin", new=type("TTY", (), {"isatty": lambda self: True})())
     def test_mutating_command_requires_and_accepts_terminal_confirmation(
-        self, _tty, _input, mocked_run, _which
+        self, _input, mocked_run, _which
     ):
         mocked_run.return_value.returncode = 0
         mocked_run.return_value.stdout = "Success"
@@ -124,7 +124,7 @@ class GeneralCliBridgeTests(unittest.TestCase):
         mocked_run.assert_called_once()
 
     @patch("tsbot.subprocess.run")
-    @patch("sys.stdin.isatty", return_value=False)
+    @patch("tsbot.sys.stdin", new=type("TTY", (), {"isatty": lambda self: False})())
     def test_mutating_command_refused_without_terminal(self, _tty, mocked_run):
         result = tsbot.tool_tailscale_cli(["set", "--exit-node="])
         self.assertIn("approval required", result)
@@ -132,15 +132,15 @@ class GeneralCliBridgeTests(unittest.TestCase):
 
     @patch("tsbot.subprocess.run")
     @patch("builtins.input", return_value="NO")
-    @patch("sys.stdin.isatty", return_value=True)
-    def test_mutating_command_cancelled_without_exact_yes(self, _tty, _input, mocked_run):
+    @patch("tsbot.sys.stdin", new=type("TTY", (), {"isatty": lambda self: True})())
+    def test_mutating_command_cancelled_without_exact_yes(self, _input, mocked_run):
         result = tsbot.tool_tailscale_cli(["down"])
         self.assertIn("cancelled", result)
         mocked_run.assert_not_called()
 
-    @patch("sys.stdin.isatty", return_value=False)
+    @patch("tsbot.sys.stdin", new=type("TTY", (), {"isatty": lambda self: False})())
     @patch("tsbot.subprocess.run")
-    def test_shell_syntax_is_passed_as_one_argument_never_executed_by_a_shell(self, _run, _tty):
+    def test_shell_syntax_is_passed_as_one_argument_never_executed_by_a_shell(self, _run):
         result = tsbot.tool_tailscale_cli(["status; rm -rf /"])
         self.assertIn("approval required", result)
         _run.assert_not_called()
