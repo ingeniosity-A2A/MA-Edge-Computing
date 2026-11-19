@@ -1,6 +1,6 @@
 # Air-Ava007
 
-Air-Ava007 is the Rust-native execution and evidence substrate owned by **MA-Edge-Computing**. It is the renamed successor to the Air-LLM design, not a new AI model and not a quantum computer.
+Air-Ava007 is the Rust-native execution and evidence substrate owned by **MA-Edge-Computing**. It is the execution substrate for the Kinetic Intelligence Coupling Engine (KICE) — the model-independent intelligence coordination and evaluation capability — not a new AI model and not a quantum computer.
 
 ## Architectural contract
 
