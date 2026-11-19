@@ -90,6 +90,7 @@ sudo install -m600 /dev/null /etc/tsbot/tsbot.env
 sudo tee /etc/tsbot/tsbot.env >/dev/null <<'EOF'
 OPENROUTER_API=sk-or-...
 TS_MODEL=xiaomi/mimo-v2.6-pro
+TS_WATCH_PEERS=100.121.129.77
 EOF
 sudo systemctl daemon-reload && sudo systemctl enable --now tsbot
 journalctl -u tsbot -f --output=cat
