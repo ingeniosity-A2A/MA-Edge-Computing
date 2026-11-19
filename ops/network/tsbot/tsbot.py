@@ -36,6 +36,7 @@ import re
 import subprocess
 import sys
 import time
+import shutil
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -304,13 +305,17 @@ def run_daemon() -> int:
 
 # ---------- natural language ----------
 SYSTEM_PROMPT = (
-    "You are the Tailscale technician for this host. Answer from tool output only; never invent node names, "
-    "IPs or flags. You cannot bring the tunnel up, down, log out or log in — those are operator actions, so when "
-    "one is needed, say exactly which command the operator should run and why. Be brief: 2-4 sentences, and name "
-    "the command or node you used."
+    "You are the Tailscale technician for this host. Answer from tool output only; never invent node names, IPs or flags. Use tailscale_cli for native Tailscale operations rather than claiming a command is unsupported. Pass arguments as an argv array, never as shell text. Read-only commands execute directly. State-changing commands require the VPS operator to type YES at the terminal; do not claim success unless the tool returns exit_code=0. Never alter tailnet grants or policy through this agent. Be brief and report the exact command and result."
 )
 
 TOOLS = [
+    {"type": "function", "function": {
+        "name": "tailscale_cli",
+        "description": "Execute any native Tailscale CLI subcommand on this VPS. Pass argv as an array, without the leading 'tailscale'. Read-only commands run directly; every other command requires explicit terminal confirmation. Never use a shell.",
+        "parameters": {"type": "object", "properties": {
+            "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                    "description": "Exact Tailscale CLI arguments, e.g. [\"status\", \"--json\"] or [\"set\", \"--exit-node=vps-73b462c2\"]"}},
+            "required": ["argv"]}}},
     {"type": "function", "function": {
         "name": "tailnet_status",
         "description": "Backend state, health warnings, exit node and peer counts for this host.",
@@ -344,6 +349,46 @@ TOOLS = [
             "limit": {"type": "integer", "description": "how many lines, default 20"}}}}},
 ]
 
+
+READ_ONLY_CLI_ROOTS = {"status", "netcheck", "ip", "version", "ping", "whois", "metrics", "licenses"}
+
+def tool_tailscale_cli(argv: list[str]) -> str:
+    """General native CLI bridge; mutations require an operator at the VPS terminal."""
+    if not isinstance(argv, list) or not argv or any(
+        not isinstance(part, str) or not part or "\\x00" in part for part in argv
+    ):
+        return "refused: argv must be a non-empty array of non-empty strings"
+    if argv[0] == "dns" and len(argv) >= 2 and argv[1] == "status":
+        read_only = True
+    else:
+        read_only = argv[0] in READ_ONLY_CLI_ROOTS
+    if not read_only:
+        if not sys.stdin.isatty():
+            return "approval required: this command changes Tailscale state; rerun tsbot interactively on the VPS terminal to review and approve it"
+        command = ["tailscale", *argv]
+        print("\\nTailscale command requires operator approval:", file=sys.stderr)
+        print("  " + " ".join(repr(x) for x in command), file=sys.stderr)
+        try:
+            answer = input("Execute this exact command? Type YES to proceed: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return "cancelled: no operator approval received"
+        if answer != "YES":
+            return "cancelled: operator did not approve"
+    binary = shutil.which("tailscale")
+    if not binary:
+        return "tailscale executable not found on PATH"
+    try:
+        done = subprocess.run(
+            [binary, *argv], capture_output=True, text=True, timeout=120, check=False
+        )
+        return clip(
+            f"$ tailscale {' '.join(argv)}\\nexit_code={done.returncode}\\n"
+            f"stdout:\\n{done.stdout}\\nstderr:\\n{done.stderr}", 6000
+        )
+    except subprocess.TimeoutExpired:
+        return "tailscale command timed out after 120 seconds"
+    except OSError as exc:
+        return f"tailscale execution failed: {exc}"
 
 def tool_status() -> str:
     return json.dumps(diagnose())
@@ -400,6 +445,7 @@ def tool_repair_log(limit: int = 20) -> str:
 
 
 TOOL_MAP = {
+    "tailscale_cli": tool_tailscale_cli,
     "tailnet_status": tool_status,
     "tailnet_netcheck": tool_netcheck,
     "tailnet_ping": tool_ping,
