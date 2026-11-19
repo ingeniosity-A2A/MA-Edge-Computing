@@ -26,9 +26,11 @@ argv it received. The tailnet behaviour itself is unmeasured until it runs on th
 ## Edge-computing placement and responsibility boundary
 
 The VPS is the network-control host. Its `tsbot` process monitors and, within its allowlist,
-changes only the VPS node's local Tailscale preferences. It can inspect the S26 as a peer
-from the VPS using tailnet peer status and `tailscale ping`; this is observation of
-host-to-peer reachability, not authority over the phone's Android VPN service.
+changes only the VPS node's local Tailscale preferences. Set
+`TS_WATCH_PEERS=100.121.129.77` (or the verified current S26 MagicDNS name) to probe
+the S26 on every watchdog cycle. Probes accept direct or DERP responses and record
+the peer, reachability, and transport output in the journal. A failed peer probe is
+reported; it does not change the phone, grants, or Rustunnel.
 
 The S26 Ultra is an edge client/sensory node. Android's official Tailscale app owns the
 phone's VPN lifecycle, authentication, and network attachment. Termux is a user-space
@@ -65,12 +67,13 @@ inline in the systemd unit. Four of those do not hold up:
 
 ## Allowlist
 
-Everything `tsbot` may execute, printed by `tsbot --allowlist`:
+The command boundary allows the exact read-only probes plus validated parameterized `ping` and `set` forms:
 
 ```
 status --json · status · netcheck --format=json · netcheck · ip -4 · ip · version
-dns status --json · ping * · set --exit-node=* · set --accept-routes[=false]
-set --advertise-exit-node[=false] · set --shields-up[=false]
+dns status --json · ping --until-direct=false -c 2 --timeout=3s <validated-node>
+set --exit-node=<empty-or-validated-node>
+set --accept-routes=true|false · set --advertise-exit-node=true|false · set --shields-up=true|false
 ```
 
 Absent by design: `up`, `down`, `logout`, `login`, `serve`, `funnel`, `cert`, `ssh`, `debug`.
