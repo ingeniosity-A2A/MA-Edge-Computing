@@ -138,9 +138,12 @@ class GeneralCliBridgeTests(unittest.TestCase):
         self.assertIn("cancelled", result)
         mocked_run.assert_not_called()
 
-    def test_argv_validation_rejects_shell_injection_shape(self):
+    @patch("sys.stdin.isatty", return_value=False)
+    @patch("tsbot.subprocess.run")
+    def test_shell_syntax_is_passed_as_one_argument_never_executed_by_a_shell(self, _run, _tty):
         result = tsbot.tool_tailscale_cli(["status; rm -rf /"])
-        self.assertIn("approval required", result) if "approval required" in result else self.assertIn("cancelled", result)
+        self.assertIn("approval required", result)
+        _run.assert_not_called()
 
 
 if __name__ == "__main__":
