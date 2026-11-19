@@ -6,12 +6,11 @@
     tsbot "why is nas-box slow" one natural-language request, then exit
     tsbot                       interactive terminal session
 
-The model is MiMo through an OpenRouter-compatible endpoint, and it has no way
-to call `tailscale up`, `down`, `logout` or `login`: those are connectivity
-actions for the operator, so the agent can only propose them. What it may do
-autonomously is the reversible half — clearing a broken exit node with
-`tailscale set --exit-node=`, after two consecutive probes of the exit node
-itself fail, at most once per cooldown window.
+The model is MiMo through an OpenRouter-compatible endpoint. The interactive
+operator mode can invoke the native Tailscale CLI through an argv-only bridge;
+state-changing commands require explicit confirmation from the VPS terminal.
+The separate unattended watchdog retains a narrow command boundary and may
+only clear a failed exit-node preference after two consecutive failed probes.
 
 Configuration (environment):
     OPENROUTER_API     required for the natural-language modes
