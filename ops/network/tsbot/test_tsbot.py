@@ -97,5 +97,51 @@ class AllowlistTests(unittest.TestCase):
         mocked_run.assert_not_called()
 
 
+class GeneralCliBridgeTests(unittest.TestCase):
+    @patch("tsbot.shutil.which", return_value="/usr/bin/tailscale")
+    @patch("tsbot.subprocess.run")
+    def test_read_only_native_command_executes_without_confirmation(self, mocked_run, _which):
+        mocked_run.return_value.returncode = 0
+        mocked_run.return_value.stdout = "Running"
+        mocked_run.return_value.stderr = ""
+        result = tsbot.tool_tailscale_cli(["status", "--json"])
+        self.assertIn("exit_code=0", result)
+        mocked_run.assert_called_once()
+        self.assertEqual(mocked_run.call_args.args[0], ["/usr/bin/tailscale", "status", "--json"])
+
+    @patch("tsbot.shutil.which", return_value="/usr/bin/tailscale")
+    @patch("tsbot.subprocess.run")
+    @patch("builtins.input", return_value="YES")
+    @patch("sys.stdin.isatty", return_value=True)
+    def test_mutating_command_requires_and_accepts_terminal_confirmation(
+        self, _tty, _input, mocked_run, _which
+    ):
+        mocked_run.return_value.returncode = 0
+        mocked_run.return_value.stdout = "Success"
+        mocked_run.return_value.stderr = ""
+        result = tsbot.tool_tailscale_cli(["set", "--exit-node=vps-73b462c2"])
+        self.assertIn("exit_code=0", result)
+        mocked_run.assert_called_once()
+
+    @patch("tsbot.subprocess.run")
+    @patch("sys.stdin.isatty", return_value=False)
+    def test_mutating_command_refused_without_terminal(self, _tty, mocked_run):
+        result = tsbot.tool_tailscale_cli(["set", "--exit-node="])
+        self.assertIn("approval required", result)
+        mocked_run.assert_not_called()
+
+    @patch("tsbot.subprocess.run")
+    @patch("builtins.input", return_value="NO")
+    @patch("sys.stdin.isatty", return_value=True)
+    def test_mutating_command_cancelled_without_exact_yes(self, _tty, _input, mocked_run):
+        result = tsbot.tool_tailscale_cli(["down"])
+        self.assertIn("cancelled", result)
+        mocked_run.assert_not_called()
+
+    def test_argv_validation_rejects_shell_injection_shape(self):
+        result = tsbot.tool_tailscale_cli(["status; rm -rf /"])
+        self.assertIn("approval required", result) if "approval required" in result else self.assertIn("cancelled", result)
+
+
 if __name__ == "__main__":
     unittest.main()
