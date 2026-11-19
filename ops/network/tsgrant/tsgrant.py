@@ -145,11 +145,31 @@ def get_policy() -> tuple[str, str]:
 
 
 def validate_policy(text: str) -> tuple[bool, str]:
+    """Validate the supplied policy, including Tailscale's HTTP-200 error bodies.
+
+    The policy API can return HTTP 200 with a non-empty JSON "message" when
+    parsing or policy tests fail. Status alone is therefore not a success
+    signal; an empty body or an empty JSON object is the success response.
+    """
     status, _, body = api("POST", f"{acl_path()}/validate", body=text,
                           headers={"Content-Type": "application/hujson"})
-    if status == 200:
-        return True, body.strip() or "{}"
-    return False, f"HTTP {status}: {body.strip()[:600]}"
+    detail = body.strip()
+    if status != 200:
+        return False, f"HTTP {status}: {detail[:600]}"
+    if not detail:
+        return True, "{}"
+    try:
+        payload = json.loads(detail)
+    except json.JSONDecodeError:
+        return False, f"validator returned an unrecognized HTTP-200 response: {detail[:600]}"
+    if not isinstance(payload, dict):
+        return False, f"validator returned an unexpected response: {detail[:600]}"
+    message = payload.get("message")
+    if message:
+        return False, detail[:600]
+    if payload.get("errors") or payload.get("data"):
+        return False, detail[:600]
+    return True, detail
 
 
 def put_policy(text: str, etag: str) -> tuple[int, str, str]:
