@@ -1,41 +1,39 @@
-// Draft Tags-and-Groups migration policy for the Ingeniosity-A2A tailnet.
-// NOT applied. Review and apply via tsgrant/Tailscale API with ETag protection.
-// Host aliases are retained for the S26 Ultra (never tagged) and as a
-// safety net until devices are re-authenticated with their tags.
 {
-  "groups": {},
+	"groups": {},
 
-  "tagOwners": {
-    "tag:vps": ["autogroup:admin"],
-    "tag:aperture": ["autogroup:admin"]
-  },
+	"tagOwners": {
+		"tag:ava-007": ["autogroup:admin"],
+		"tag:vps": ["autogroup:admin"],
+		"tag:aperture": ["autogroup:admin"],
+	},
 
-  "hosts": {
-    "vps": "100.91.36.108",
-    "s26-ultra": "100.121.129.77",
-    "aperture": "100.75.232.23"
-  },
+	"hosts": {
+		"vps": "100.91.36.108",
+		"s26-ultra": "100.121.129.77",
+		"aperture": "100.75.232.23",
+	},
 
-  "grants": [
-    {
-      "src": ["autogroup:admin"],
-      "dst": ["vps", "tag:vps"],
-      "ip": ["tcp:22"]
-    },
-    {
-      "src": ["s26-ultra"],
-      "dst": ["vps", "tag:vps"],
-      "ip": ["tcp:4040"]
-    },
-    {
-      "src": ["autogroup:member"],
-      "dst": ["vps", "tag:vps"],
-      "ip": ["tcp:20000-20050"]
-    },
-    {
-      "src": ["s26-ultra"],
-      "dst": ["autogroup:internet"],
-      "ip": ["*"]
-    }
-  ]
+	"grants": [
+		{
+			"src": ["100.121.129.77"],
+			"dst": ["100.91.36.108", "tag:vps"],
+			"ip":  ["tcp:4040", "tcp:8443"],
+		},
+	],
+
+	"ssh": [
+		{
+			"action": "check",
+			"src":    ["autogroup:member"],
+			"dst":    ["autogroup:self"],
+			"users":  ["autogroup:nonroot", "root"],
+		},
+	],
+
+	"nodeAttrs": [
+		{
+			"target": ["autogroup:member"],
+			"attr":   ["funnel"],
+		},
+	],
 }
