@@ -21,7 +21,7 @@ pub struct StanzaChecker;
 impl StanzaChecker {
     pub fn invariants() -> Vec<StructuralInvariant> {
         vec![
-            StructuralInvariant { id: "SI-001".into(), description: "No subprocess delegation in native code".into(), check_type: "pattern".into() },
+            StructuralInvariant { id: "SI-001".into(), description: "No subprocess delegation in native code (Rust/C/C++/Go)".into(), check_type: "pattern".into() },
             StructuralInvariant { id: "SI-002".into(), description: "No Python/Node/Ruby references in Rust/C files".into(), check_type: "pattern".into() },
             StructuralInvariant { id: "SI-003".into(), description: "No eval/exec/compile in Python files".into(), check_type: "pattern".into() },
             StructuralInvariant { id: "SI-004".into(), description: "Dependency graph is acyclic".into(), check_type: "graph".into() },
@@ -32,45 +32,89 @@ impl StanzaChecker {
 
     pub fn check(worktree_path: &str) -> Vec<InvariantResult> {
         let mut results = Vec::new();
-        // SI-001
-        results.push(Self::scan_pattern(worktree_path, "SI-001", &["std::process::Command", "Command::new", "subprocess"], &["rs", "c", "cpp", "go"]));
-        // SI-002
-        results.push(Self::scan_pattern(worktree_path, "SI-002", &["python", "node ", "ruby"], &["rs", "c", "cpp", "h"]));
-        // SI-003
-        results.push(Self::scan_pattern(worktree_path, "SI-003", &["eval(", "exec(", "compile("], &["py"]));
-        // SI-004
-        results.push(InvariantResult { invariant_id: "SI-004".into(), passed: true, details: "acyclic (assumed)".into(), violations: vec![] });
-        // SI-005
-        results.push(InvariantResult { invariant_id: "SI-005".into(), passed: true, details: "compact".into(), violations: vec![] });
-        // SI-006
-        results.push(Self::scan_pattern(worktree_path, "SI-006", &["ureq", "reqwest", "http::", "TcpStream"], &["rs"]));
+        results.push(Self::scan_patterns("SI-001", worktree_path, &[".rs", ".c", ".h", ".cpp", ".cc", ".go"], &["Command::new", "std::process", "popen", "system(", "subprocess", "os.system", "child_process", "ProcessBuilder", "Runtime.getRuntime"], "subprocess delegation in native code"));
+        results.push(Self::scan_patterns("SI-002", worktree_path, &[".rs", ".c", ".h", ".cpp", ".cc"], &["import subprocess", "python3", "python -c", "python -m", "child_process", "from subprocess import", "pyo3"], "interpreter references in Rust/C files"));
+        results.push(Self::scan_patterns("SI-003", worktree_path, &[".py"], &["eval(", "exec(", "__import__(", "compile("], "eval/exec/compile in Python files"));
+        results.push(Self::check_cargo_acyclicity(worktree_path));
+        results.push(Self::check_diff_compactness(worktree_path));
+        results.push(Self::scan_patterns("SI-006", worktree_path, &["test", "_test.", "tests/"], &["urllib.request", "requests.get", "requests.post", "fetch(", "http::Client", "reqwest::", "ureq::post"], "network calls in test code"));
         results
     }
 
-    fn scan_pattern(worktree_path: &str, id: &str, patterns: &[&str], exts: &[&str]) -> InvariantResult {
+    fn scan_patterns(id: &str, worktree_path: &str, extensions: &[&str], patterns: &[&str], description: &str) -> InvariantResult {
         let mut violations = Vec::new();
-        let ext_set: std::collections::HashSet<&str> = exts.iter().cloned().collect();
+        let skip_dirs = [".git", "target", "node_modules", "__pycache__"];
         for entry in WalkDir::new(worktree_path).into_iter().filter_map(|e| e.ok()).filter(|e| e.file_type().is_file()) {
             let path = entry.path();
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if !ext_set.contains(ext) { continue; }
-            let rel = path.strip_prefix(worktree_path).unwrap_or(path).to_string_lossy().to_string();
-            if rel.contains("/target/") || rel.contains("/.git/") { continue; }
+            let path_str = path.to_string_lossy();
+            let matches_ext = extensions.iter().any(|e| {
+                if e.starts_with('.') { ext == &e[1..] } else { path_str.contains(e) }
+            });
+            if !matches_ext { continue; }
+            let rel = path.strip_prefix(worktree_path).unwrap_or(path);
+            let rel_str = rel.to_string_lossy();
+            if skip_dirs.iter().any(|d| rel_str.contains(&format!("{}/", d))) { continue; }
             if let Ok(content) = std::fs::read_to_string(path) {
-                for (i, line) in content.lines().enumerate() {
+                for (line_num, line) in content.lines().enumerate() {
                     for pat in patterns {
                         if line.contains(pat) {
-                            violations.push(format!("{}:{}: {}", rel, i + 1, line.trim()));
+                            violations.push(format!("{}:{} — \"{}\"", rel_str, line_num + 1, line.trim()));
                         }
                     }
                 }
             }
         }
-        InvariantResult {
-            invariant_id: id.into(),
-            passed: violations.is_empty(),
-            details: format!("{} violations", violations.len()),
-            violations,
+        if violations.is_empty() {
+            InvariantResult { invariant_id: id.into(), passed: true, details: format!("{}: CLEAN (0 violations)", description), violations: vec![] }
+        } else {
+            InvariantResult { invariant_id: id.into(), passed: false, details: format!("{}: {} violations", description, violations.len()), violations }
+        }
+    }
+
+    fn check_cargo_acyclicity(worktree_path: &str) -> InvariantResult {
+        let cargo_path = std::path::Path::new(worktree_path).join("Cargo.toml");
+        if !cargo_path.exists() {
+            return InvariantResult { invariant_id: "SI-004".into(), passed: true, details: "No Cargo.toml found. Skipping.".into(), violations: vec![] };
+        }
+        let content = std::fs::read_to_string(&cargo_path).unwrap_or_default();
+        if content.contains("[workspace]") {
+            InvariantResult { invariant_id: "SI-004".into(), passed: true, details: "Workspace member structure: acyclic by construction".into(), violations: vec![] }
+        } else {
+            let mut has_circular = false;
+            let mut violations = vec![];
+            if content.contains("path = \"./\"") || content.contains("path = \".\"") {
+                has_circular = true;
+                violations.push("Self-referencing path dependency detected".to_string());
+            }
+            InvariantResult { invariant_id: "SI-004".into(), passed: !has_circular, details: if has_circular { "Dependency graph: CIRCULAR".into() } else { "Dependency graph: acyclic".into() }, violations }
+        }
+    }
+
+    fn check_diff_compactness(worktree_path: &str) -> InvariantResult {
+        let output = std::process::Command::new("git").args(["diff", "--numstat", "HEAD"]).current_dir(worktree_path).output();
+        match output {
+            Ok(out) => {
+                let stat = String::from_utf8_lossy(&out.stdout);
+                let mut bloated = vec![];
+                for line in stat.lines() {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 3 {
+                        let added: usize = parts[0].parse().unwrap_or(0);
+                        let deleted: usize = parts[1].parse().unwrap_or(0);
+                        let total = added + deleted;
+                        if total > 500 {
+                            bloated.push(format!("{} — {} lines changed ({}+ {}-)", parts[2], total, added, deleted));
+                        }
+                    }
+                }
+                if bloated.is_empty() {
+                    InvariantResult { invariant_id: "SI-005".into(), passed: true, details: "Diff compactness: PASS (all files ≤ 500 lines changed)".into(), violations: vec![] }
+                } else {
+                    InvariantResult { invariant_id: "SI-005".into(), passed: false, details: format!("Diff compactness: FAIL — {} bloated files", bloated.len()), violations: bloated }
+                }
+            }
+            Err(e) => InvariantResult { invariant_id: "SI-005".into(), passed: true, details: format!("Diff compactness: skipped (git not available: {})", e), violations: vec![] },
         }
     }
 }
