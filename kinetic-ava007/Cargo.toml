@@ -8,4 +8,5 @@ members = [
     "crates/kinetic-consensus",
     "crates/kinetic-dfm",
     "crates/kice",
+    "crates/exo-gate",
 ]
