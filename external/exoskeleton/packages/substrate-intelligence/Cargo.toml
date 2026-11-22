@@ -1,0 +1,49 @@
+[package]
+name = "substrate-intelligence"
+version = "2.0.0"
+edition = "2021"
+description = "Exoskeleton deterministic compliance gate: hard-veto, soft-disagreement, structural invariants, epistemic receipts, JevOut routing"
+license = "Apache-2.0"
+rust-version = "1.75"
+
+[lib]
+name = "substrate_intelligence"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gate"
+path = "src/main.rs"
+
+[[test]]
+name = "zero_context_compliance"
+path = "tests/zero_context_compliance.rs"
+
+[[test]]
+name = "gating_unit"
+path = "tests/gating_unit.rs"
+
+[[test]]
+name = "stanza_unit"
+path = "tests/stanza_unit.rs"
+
+[[test]]
+name = "clairic_extract_unit"
+path = "tests/clairic_extract_unit.rs"
+
+[dependencies]
+ureq = { version = "3.5.2", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+blake2 = "0.10"
+walkdir = "2"
+tempfile = "3"
+
+[dev-dependencies]
+ureq = { version = "3.5.2", features = ["json"] }
+serde_json = "1"
+tempfile = "3"
+
+[features]
+default = []
+live-tests = []
